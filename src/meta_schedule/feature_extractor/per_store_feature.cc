@@ -17,6 +17,7 @@
  * under the License.
  */
 #include <tvm/tir/transform.h>
+#include <tvm/auto_scheduler/feature.h>
 
 #include <cmath>
 #include <memory>
@@ -289,9 +290,10 @@ Sequential PassListForPerStoreFeature() {
       tir::transform::PlanAndUpdateBufferAllocationLocation(),
       tir::transform::ApplyBlockBoundPredicate(),
       tir::transform::ConvertBlocksToOpaque(),
-      tir::transform::UnifyThreadBinding(),
-      tir::transform::CompactBufferAllocation(),
+//      tir::transform::UnifyThreadBinding(),
+      tir::transform::CompactBufferAllocationFeatureExtraction(),
       tir::transform::LowerMatchBuffer(),
+      tir::transform::FlattenBufferForFeature(),
       tir::transform::Simplify(),
   });
 }
@@ -1250,20 +1252,20 @@ class PerStoreFeatureNode : public FeatureExtractorNode {
   void ExtractSingle(IRModule mod, bool is_gpu, std::vector<std::vector<double>>* results) {
     static transform::Sequential passes = tir::transform::PassListForPerStoreFeature();
     mod = passes(std::move(mod));
-    std::vector<tir::Feature> features = tir::PerStoreFeatureCollector::Collect(
-        is_gpu, this->cache_line_bytes, this->arith_intensity_curve_num_samples, mod);
-    int n_features = features.size();
-    results->resize(n_features);
-    for (int i = 0; i < n_features; ++i) {
-      const tir::Feature& feature = features[i];
-      std::vector<double>& result = (*results)[i];
-      result.reserve(feature_vector_length);
-      feature.group1->Export(&result);
-      feature.group2->Export(&result, this->buffers_per_store);
-      feature.group3->Export(&result);
-      feature.group4->Export(&result, feature.group5->outer_prod);
-      feature.group5->Export(&result);
-      ICHECK_EQ(static_cast<int>(result.size()), feature_vector_length);
+    for (const auto& kv : mod->functions) {
+      if (const tir::PrimFuncNode* func = kv.second.as<tir::PrimFuncNode>()) {
+        std::vector<float> ret;
+        auto_scheduler::GetPerStoreFeature(func->body, cache_line_bytes,
+                                                           buffers_per_store, &ret);
+        int size = ret[0];
+        for (int i = 0;i<size;i++) {
+          std::vector<double> feature;
+          for (int j = 0; j < 164; j++) {
+            feature.push_back(ret[i*164 + j+1]);
+          }
+          results->push_back(feature);
+        }
+      }
     }
   }
 

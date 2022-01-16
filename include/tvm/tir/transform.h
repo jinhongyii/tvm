@@ -509,6 +509,9 @@ TVM_DLL Pass LowerAutoCopy();
  */
 TVM_DLL Pass RenormalizeSplitPattern();
 
+TVM_DLL Pass FlattenBufferForFeature();
+
+TVM_DLL Pass CompactBufferAllocationFeatureExtraction();
 }  // namespace transform
 }  // namespace tir
 }  // namespace tvm

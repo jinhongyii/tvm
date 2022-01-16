@@ -581,7 +581,7 @@ class PerStoreFeatureExtractor : public StmtExprVisitor {
 
       int* plen = nullptr;
 
-      const std::string& name = var.get()->name_hint;
+      const std::string& name =  node->node.as<IterVarNode>()->thread_tag;
       if (node->attr_key == tir::attr::thread_extent) {
         if (name == "blockIdx.x") {
           plen = &blockIdx_x_len_;
