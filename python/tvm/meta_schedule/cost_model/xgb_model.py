@@ -22,6 +22,7 @@ import logging
 import os
 import tempfile
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, TYPE_CHECKING, Tuple
+from collections import defaultdict
 
 import numpy as np
 
@@ -33,9 +34,10 @@ from ..search_strategy import MeasureCandidate
 from ..utils import cpu_count
 from .metric import max_curve
 
-if TYPE_CHECKING:
-    from ..tune_context import TuneContext
-    import xgboost as xgb
+
+# if TYPE_CHECKING:
+from ..tune_context import TuneContext
+import xgboost as xgb
 
 
 logger = logging.getLogger(__name__)
@@ -235,6 +237,43 @@ class XGBConfig(NamedTuple):
     seed: int = 43
     nthread: Optional[int] = None
 
+
+class XGBDMatrixContext:
+    """A global context to hold additional attributes of xgb.DMatrix"""
+
+    def __init__(self):
+        self.context_dict = defaultdict(dict)
+
+    def get(self, key, matrix, default=None):
+        """
+        Get an attribute of a xgb.DMatrix
+        Parameters
+        ----------
+        key: str
+            The name of the attribute
+        matrix: xgb.DMatrix
+            The matrix
+        default: Optional[Any]
+            The default value if the item does not exist
+        """
+        return self.context_dict[key].get(matrix.handle.value, default)
+
+    def set(self, key, matrix, value):
+        """
+        Set an attribute for a xgb.DMatrix
+        Parameters
+        ----------
+        key: str
+            The name of the attribute
+        matrix: xgb.DMatrix
+            The matrix
+        value: Optional[Any]
+            The new value
+        """
+        self.context_dict[key][matrix.handle.value] = value
+
+
+dmatrix_context = XGBDMatrixContext()
 
 class XGBModel(PyCostModel):
     """XGBoost model
@@ -460,50 +499,39 @@ class XGBModel(PyCostModel):
     ) -> None:
         import xgboost as xgb  # type: ignore # pylint: disable=import-outside-toplevel
 
-        self.d_train = PackSum(
-            xs=xs,
-            ys=self.cached_normalizer / ys,
+        dtrain = pack_sum_xgbmatrix(
+            xs, self.cached_normalizer / ys, None, self.cached_normalizer / ys
         )
 
-        def obj(ys_pred: np.ndarray, d_train: "xgb.DMatrix"):  # type: ignore # pylint: disable = unused-argument
-            return self.d_train.obj_square_error(ys_pred)
-
-        def rmse(ys_pred: np.ndarray, d_train: "xgb.DMatrix"):  # type: ignore # pylint: disable = unused-argument
-            return self.d_train.rmse(ys_pred)
-
-        def average_peak_score(
-            ys_pred: np.ndarray, d_train: "xgb.DMatrix"  # type: ignore # pylint: disable = unused-argument
-        ):
-            return self.d_train.average_peak_score(ys_pred, self.average_peak_n)
 
         self.booster = xgb.train(
             self.config.to_dict(),
-            self.d_train.dmatrix,
+            dtrain,
             num_boost_round=10000,
-            obj=obj,
+            obj=pack_sum_square_error,
             callbacks=[
                 custom_callback(
-                    early_stopping_rounds=self.early_stopping_rounds,
-                    verbose_eval=self.verbose_eval,
+                    stopping_rounds=50,
+                    metric="tr-p-rmse",
                     fevals=[
-                        rmse,
-                        average_peak_score,
+                        pack_sum_rmse,
+                        pack_sum_average_peak_score(32),
                     ],
-                    evals=[(self.d_train.dmatrix, "tr")],
+                    evals=[(dtrain, "tr")],
+                    maximize=False,
+                    verbose_eval=self.verbose_eval,
                 )
             ],
         )
-
-        del self.d_train
 
     def _predict(  # type: ignore # pylint: disable=invalid-name
         self,
         xs: List[np.ndarray],
     ) -> np.ndarray:
-        d_test = PackSum(xs=xs, ys=None)
-        pred = self.booster.predict(d_test.dmatrix)
-        ret = d_test.predict_with_score(pred)
-        return ret
+        dtest, pack_ids = feature_to_pack_sum_xgbmatrix(xs)
+        raw_preds = self.booster.predict(dtest)
+        ret = predict_throughput_pack_sum(raw_preds, pack_ids)
+        return  ret
 
     def _validate(  # type: ignore # pylint: disable=invalid-name
         self,
@@ -672,6 +700,325 @@ def custom_callback(
                     best_msg=state["best_msg"],
                 )
         elif env.iteration - best_iteration >= early_stopping_rounds:
+            best_msg = state["best_msg"]
+            if verbose_eval and env.rank == 0:
+                logger.debug("XGB stopped. Best iteration: %s ", best_msg)
+            raise EarlyStopException(best_iteration)
+
+    return callback
+
+
+def feature_to_pack_sum_xgbmatrix(xs):
+    """Convert an extracted multi-stage feature vector to a xgbmatrx in pack-sum format
+    Parameters
+    ----------
+    xs: np.ndarray
+        The feature vector
+    Returns
+    -------
+    dmatrix: xgb.DMatrix
+        The DMatrix
+    pack_ids: List[int]
+        pack ids information
+    """
+    x_flatten = []
+    pack_ids = []
+
+    for ct, x in enumerate(xs):
+        for row in x:
+            x_flatten.append(row)
+            pack_ids.append(ct)
+
+    return xgb.DMatrix(np.array(x_flatten)), pack_ids
+
+
+def pack_sum_xgbmatrix(xs, ys, gids=None, weights=None):
+    """Convert (feature, label) pairs into a xgb matrix with pack-sum format
+    Parameters
+    ----------
+    xs: np.ndarray
+        The feature vector
+    ys: np.ndarray
+        The normaizlied throughput
+    gids: Optional[List[int]]
+        Group id (task id)
+    weights: Optional[np.ndarray]
+        The weight of samples
+    Returns
+    -------
+    dmatrix: xgb.DMatrix
+        The DMatrix with pack-sum information
+    """
+    if gids is not None:
+        # sort by group
+        indices = gids.argsort()
+        xs, ys = xs[indices], ys[indices]
+        group_sizes = np.bincount(gids)
+        if weights is not None:
+            weights = weights[indices]
+    else:
+        # assume it has only one group
+        group_sizes = [len(xs)]
+
+    x_flatten = []
+    y_flatten = []
+    weights_flatten = []
+    pack_ids = []
+
+    if weights is not None:
+        for ct, (x, y, w) in enumerate(zip(xs, ys, weights)):
+            for row in x:
+                x_flatten.append(row)
+                y_flatten.append(y)
+                weights_flatten.append(w)
+                pack_ids.append(ct)
+    else:
+        for ct, (x, y) in enumerate(zip(xs, ys)):
+            for row in x:
+                x_flatten.append(row)
+                y_flatten.append(y)
+                pack_ids.append(ct)
+
+    ret = xgb.DMatrix(np.array(x_flatten), y_flatten)
+    if weights is not None:
+        ret.set_weight(weights_flatten)
+    dmatrix_context.set("pack_ids", ret, np.array(pack_ids))
+    dmatrix_context.set("group_sizes", ret, group_sizes)
+    return ret
+
+
+def predict_throughput_pack_sum(raw_preds, pack_ids):
+    """Predict the throughputs for predictions in pack-sum format
+    Parameters
+    ----------
+    raw_preds: np.ndarray
+        The raw predictions
+    pack_ids: List[int]
+        The pack id for predictions
+    Returns
+    -------
+    throughputs: np.ndarray
+        The throughput
+    """
+    sum_pred = np.bincount(pack_ids, weights=raw_preds)
+    return sum_pred
+
+
+def pack_sum_square_error(preds, dtrain):
+    """Implement square error loss on pack-sum format as
+     a custom objective function for xgboost.
+    Parameters
+    ----------
+    preds: np.ndarray
+        The predicitons
+    dtrain: xgb.DMatrix
+        The training set
+    Returns
+    -------
+    gradient: np.ndarray
+    hessian: np.ndarray
+        gradient and hessian according to the xgboost format
+    """
+    pack_ids = dmatrix_context.get("pack_ids", dtrain)
+    weight = dtrain.get_weight()
+
+    sum_pred = np.bincount(pack_ids, weights=preds)
+    x = sum_pred[pack_ids]
+    y = dtrain.get_label()
+    gradient = x - y
+    hessian = np.ones_like(gradient)
+
+    if len(weight) == 0:
+        return gradient, hessian
+
+    return gradient * weight, hessian * weight
+
+
+def pack_sum_rmse(raw_preds, labels):
+    """Evaluate RMSE (rooted mean square error) in the pack-sum format
+    Parameters
+    ----------
+    raw_preds: np.ndarray
+        The raw prediction
+    labels: xgb.DMatrix
+        The groud-truth label matrix
+    Returns
+    -------
+    name: str
+    score: float
+        The name and score of this metric
+    """
+    pack_ids = dmatrix_context.get("pack_ids", labels)
+    preds = predict_throughput_pack_sum(raw_preds, pack_ids)[pack_ids]
+    return "p-rmse", np.sqrt(np.mean(np.square((preds - labels.get_label()))))
+
+
+def pack_sum_average_peak_score(N):
+    """Return the evaluation function for average-peak-score@N
+    Parameters
+    ----------
+    N: int
+        The "N" in "average-peak-score@N"
+    Returns
+    -------
+    The evaluation function
+    """
+
+    def feval(preds, labels):
+        """Evaluate average-peak-score@N in the pack-sum format
+        Parameters
+        ----------
+        raw_preds: np.ndarray
+            The raw prediction
+        labels: xgb.DMatrix
+            The groud-truth label matrix
+        Returns
+        -------
+        name: str
+        score: float
+        The name and score of this metric
+        """
+        group_sizes = dmatrix_context.get("group_sizes", labels, [len(preds)])
+        pack_ids = dmatrix_context.get("pack_ids", labels)
+
+        preds = predict_throughput_pack_sum(preds, pack_ids)
+        labels = (
+                np.bincount(pack_ids, weights=labels.get_label())
+                / np.unique(pack_ids, return_counts=True)[1]
+        )
+
+        scores = []
+        offset = 0
+        for size in group_sizes:
+            preds_group = preds[offset : offset + size]
+            labels_group = labels[offset : offset + size]
+            offset += size
+
+            trials = np.argsort(preds_group)[::-1][:N]
+            trial_scores = labels_group[trials]
+            curve = max_curve(trial_scores) / np.max(labels_group)
+            scores.append(np.mean(curve))
+        return "a-peak@%d" % N, np.mean(scores)
+
+    return feval
+
+
+def custom_callback(
+        stopping_rounds,
+        metric,
+        fevals,
+        evals=(),
+        log_file=None,
+        maximize=False,
+        verbose_eval=True,
+        skip_every=2,
+):
+    """Callback function for xgboost to support multiple custom evaluation functions"""
+    # pylint: disable=import-outside-toplevel
+    from xgboost.core import EarlyStopException
+    from xgboost.callback import _fmt_metric
+
+    try:
+        from xgboost.training import aggcv
+    except ImportError:
+        from xgboost.callback import _aggcv as aggcv
+
+    state = {}
+    metric_shortname = metric.split("-")[1]
+
+    def init(env):
+        """internal function"""
+        bst = env.model
+
+        state["maximize_score"] = maximize
+        state["best_iteration"] = 0
+        if maximize:
+            state["best_score"] = float("-inf")
+        else:
+            state["best_score"] = float("inf")
+
+        if bst is not None:
+            if bst.attr("best_score") is not None:
+                state["best_score"] = float(bst.attr("best_score"))
+                state["best_iteration"] = int(bst.attr("best_iteration"))
+                state["best_msg"] = bst.attr("best_msg")
+            else:
+                bst.set_attr(best_iteration=str(state["best_iteration"]))
+                bst.set_attr(best_score=str(state["best_score"]))
+        else:
+            assert env.cvfolds is not None
+
+    def callback(env):
+        """internal function"""
+        if not state:
+            init(env)
+
+        bst = env.model
+        i = env.iteration
+        cvfolds = env.cvfolds
+
+        res_dict = {}
+
+        if i % skip_every == 1:
+            return
+
+        ##### evaluation #####
+        if cvfolds is not None:
+            for feval in fevals:
+                tmp = aggcv([f.eval(i, feval) for f in cvfolds])
+                for k, mean, std in tmp:
+                    res_dict[k] = [mean, std]
+        else:
+            for feval in fevals:
+                bst_eval = bst.eval_set(evals, i, feval)
+                res = [x.split(":") for x in bst_eval.split()]
+                for kv in res[1:]:
+                    res_dict[kv[0]] = [float(kv[1])]
+
+        eval_res = []
+        keys = list(res_dict.keys())
+        keys.sort(key=lambda x: x if metric_shortname not in x else "a" + x)
+        for key in keys:
+            v = res_dict[key]
+            eval_res.append([key] + v)
+
+        ##### print eval result #####
+        if not isinstance(verbose_eval, bool) and verbose_eval and i % verbose_eval == 0:
+            infos = ["XGB iter: %3d" % i]
+            for item in eval_res:
+                if "null" in item[0]:
+                    continue
+                infos.append("%s: %.6f" % (item[0], item[1]))
+
+            logger.debug("\t".join(infos))
+            if log_file:
+                with open(log_file, "a") as fout:
+                    fout.write("\t".join(infos) + "\n")
+
+        ##### choose score and do early stopping #####
+        score = None
+        for item in eval_res:
+            if item[0] == metric:
+                score = item[1]
+                break
+        assert score is not None
+
+        best_score = state["best_score"]
+        best_iteration = state["best_iteration"]
+        maximize_score = state["maximize_score"]
+        if (maximize_score and score > best_score) or (not maximize_score and score < best_score):
+            msg = "[%d] %s" % (env.iteration, "\t".join([_fmt_metric(x) for x in eval_res]))
+            state["best_msg"] = msg
+            state["best_score"] = score
+            state["best_iteration"] = env.iteration
+            # save the property to attributes, so they will occur in checkpoint.
+            if env.model is not None:
+                env.model.set_attr(
+                    best_score=str(state["best_score"]),
+                    best_iteration=str(state["best_iteration"]),
+                    best_msg=state["best_msg"],
+                )
+        elif env.iteration - best_iteration >= stopping_rounds:
             best_msg = state["best_msg"]
             if verbose_eval and env.rank == 0:
                 logger.debug("XGB stopped. Best iteration: %s ", best_msg)
