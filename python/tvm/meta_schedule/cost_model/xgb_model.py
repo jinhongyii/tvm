@@ -435,12 +435,12 @@ class XGBModel(PyCostModel):
             return float(np.median([float(s) for s in x.run_secs]))
 
         new_features = [
-            x.numpy().astype("float64")
+            x.numpy().astype("float32")
             for x in self.extractor.extract_from(tune_context, candidates)
         ]
         new_mean_costs = np.asarray(
             [_mean_cost(x) for x in results],
-            dtype="float64",
+            dtype="float32",
         )
         if self.booster is not None and self.cached_normalizer is not None:
             logger.debug(
@@ -483,7 +483,7 @@ class XGBModel(PyCostModel):
         n_measured = len(self.cached_features)
         if self.booster is not None and n_measured >= self.num_warmup_samples:
             features = self.extractor.extract_from(tune_context, candidates)
-            ret = self._predict(xs=[x.numpy().astype("float64") for x in features])
+            ret = self._predict(xs=[x.numpy().astype("float32") for x in features])
         else:
             ret = np.random.uniform(
                 low=0,
