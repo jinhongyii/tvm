@@ -661,8 +661,8 @@ class AutoCopyMutator : public StmtExprMutator {
       n->alloc_buffers = padder.PadSharedMemory(std::move(n->alloc_buffers));
       return std::move(block);
     }
-    ICHECK_EQ(block->reads.size(), 1);
     ICHECK_EQ(block->writes.size(), 1);
+
     int data_bits = block->reads[0]->buffer->dtype.bits();
     ConstraintSet constraints(this->thread_extent_,  //
                               this->outer_loops_,    //

@@ -163,6 +163,24 @@ class WmmaToGlobal:
                                     C[bx * 128 + ax0, by * 128 + ax1] = C_accum[ax0, ax1]
 
 @tvm.script.ir_module
+class WmmaToGlobalWithFusion:
+    @T.prim_func
+    def main(a: T.handle, c: T.handle) -> None:
+        A = T.match_buffer(a, [1024])
+        C = T.match_buffer(c, [1024, 1024])
+        with T.block("root"):
+            T.block_attr({"warp_execution": True})
+            for bx in T.thread_binding(8, thread="blockIdx.x"):
+                for by in T.thread_binding(8, thread="blockIdx.y"):
+                    for ty in T.thread_binding(8, thread="threadIdx.y"):
+                        with T.block():
+                            C_accum = T.alloc_buffer([128, 128], dtype="float32", scope="wmma.accumulator")
+                            with T.block("C_global"):
+                                T.block_attr({"auto_copy": 1, "vector_bytes": 16})
+                                for ax0, ax1 in T.grid(128, 128):
+                                    C[bx * 128 + ax0, by * 128 + ax1] = C_accum[ax0, ax1] + A[bx * 128 + ax0]
+
+@tvm.script.ir_module
 class TransformedGlobalToShared:
     @T.prim_func
     def main(a: T.handle, b: T.handle) -> None:
@@ -323,19 +341,60 @@ class TransformedWmmaToGlobal:
                                     for ax1_0 in T.serial(8):
                                         with T.block("wmma_store"):
                                             T.reads(C_accum[ax0_0 * 16 : ax0_0 * 16 + 16, ax1_0 * 16 : ax1_0 * 16 + 16])
-                                            T.writes(C_shared_dyn[(ax0_0 // 8 + bx) % 8 * 16 + ax0_0 % 8 * 16 - ax0_0 % 64 * 16 - bx % 8 * 16 : (ax0_0 // 8 + bx) % 8 * 16 + ax0_0 % 8 * 16 - ax0_0 % 64 * 16 - bx % 8 * 16 + 16, (ax1_0 // 8 + by) % 8 * 128 + ax1_0 % 8 * 16 - by % 8 * 128 : (ax1_0 // 8 + by) % 8 * 128 + ax1_0 % 8 * 16 - by % 8 * 128 + 16])
+                                            T.writes(C_shared_dyn[0 : 16, ax1_0 * 16 : ax1_0 * 16 + 16])
                                             src = T.match_buffer(C_accum[ax0_0 * 16 : ax0_0 * 16 + 16, ax1_0 * 16 : ax1_0 * 16 + 16], [16, 16], dtype="float32", scope="wmma.accumulator", offset_factor=16)
-                                            tgt = T.match_buffer(C_shared_dyn[(ax0_0 // 8 + bx) % 8 * 16 + ax0_0 % 8 * 16 - ax0_0 % 64 * 16 - bx % 8 * 16 : (ax0_0 // 8 + bx) % 8 * 16 + ax0_0 % 8 * 16 - ax0_0 % 64 * 16 - bx % 8 * 16 + 16, (ax1_0 // 8 + by) % 8 * 128 + ax1_0 % 8 * 16 - by % 8 * 128 : (ax1_0 // 8 + by) % 8 * 128 + ax1_0 % 8 * 16 - by % 8 * 128 + 16], [16, 16], dtype="float32", strides=[s1, s0], scope="shared.dyn", offset_factor=16)
+                                            tgt = T.match_buffer(C_shared_dyn[0 : 16, ax1_0 * 16 : ax1_0 * 16 + 16], [16, 16], dtype="float32", strides=[s1, s0], scope="shared.dyn", offset_factor=16)
                                             T.evaluate(T.tvm_store_matrix_sync(src.data, 16, 16, 16, src.elem_offset // 256 + src.elem_offset % 256 // 16, T.tvm_access_ptr(T.type_annotation(dtype="float32"), tgt.data, tgt.elem_offset, s1 * 16, 2, dtype="handle"), s1, "row_major", dtype="handle"))
-                                    for ax0_ax1_ax2_ax3_ax4_ax5_fused_0 in T.serial(2):
+                                    for ax0_ax1_ax2_ax3_ax4_ax5_fused_0 in T.serial(16):
                                         for ax0_ax1_ax2_ax3_ax4_ax5_fused_1 in T.thread_binding(8, thread="threadIdx.y"):
                                             for ax0_ax1_ax2_ax3_ax4_ax5_fused_2 in T.thread_binding(32, thread="threadIdx.x"):
                                                 for ax0_ax1_ax2_ax3_ax4_ax5_fused_3 in T.vectorized(4):
-                                                    C[((bx % 8 + 0) * 8 + (ax0_0 % 64 + 0)) * 16 + (((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) // 16 // 8 % 16, ((by % 8 + 0) * 8 + (((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) // 16 % 8) * 16 + (((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) % 16] = C_shared_dyn[(0 + 0) * 16 + (((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) // 16 // 8 % 16, (0 * 8 + (((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) // 16 % 8) * 16 + (((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) % 16]
+                                                    C[bx  * 128 + (ax0_0 * 16 + (((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) // 16 % 16), by * 128 + (((((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) // 16 // 16 % 8) * 16 + (((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) % 16)] = C_shared_dyn[(((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) // 16 % 16, ((((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) // 16 // 16 % 8) * 16 // 16 * 16 + (((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) % 16]
+
+
+@tvm.script.ir_module
+class TransformedWmmaToGlobalWithFusion:
+    @T.prim_func
+    def main(A: T.Buffer[(1024,), "float32"], C: T.Buffer[(1024, 1024), "float32"]) -> None:
+        s0 = T.var("int32")
+        s1 = T.var("int32")
+        # body
+        with T.block("root"):
+            T.reads(A[0 : 1024])
+            T.writes(C[0 : 1024, 0 : 1024])
+            T.block_attr({"warp_execution":True})
+            for bx in T.thread_binding(8, thread="blockIdx.x"):
+                for by in T.thread_binding(8, thread="blockIdx.y"):
+                    for ty in T.thread_binding(8, thread="threadIdx.y"):
+                        with T.block():
+                            T.reads(A[bx * 128 : bx * 128 + 128])
+                            T.writes(C[bx * 128 : bx * 128 + 128, by * 128 : by * 128 + 128])
+                            C_accum = T.alloc_buffer([128, 128], dtype="float32", scope="wmma.accumulator")
+                            with T.block("C_global"):
+                                T.reads(C_accum[0 : 128, 0 : 128], A[bx * 128 : bx * 128 + 128])
+                                T.writes(C[bx * 128 : bx * 128 + 128, by * 128 : by * 128 + 128])
+                                T.block_attr({"auto_copy":1, "vector_bytes":16})
+                                C_shared_dyn = T.alloc_buffer([16, 128], dtype="float32", strides=[136, 1], scope="shared.dyn")
+                                for ax0_0 in T.serial(8):
+                                    for ax1_0 in T.serial(8):
+                                        with T.block("wmma_store"):
+                                            T.reads(C_accum[ax0_0 * 16 : ax0_0 * 16 + 16, ax1_0 * 16 : ax1_0 * 16 + 16])
+                                            T.writes(C_shared_dyn[0 : 16, ax1_0 * 16 : ax1_0 * 16 + 16])
+                                            src = T.match_buffer(C_accum[ax0_0 * 16 : ax0_0 * 16 + 16, ax1_0 * 16 : ax1_0 * 16 + 16], [16, 16], dtype="float32", scope="wmma.accumulator", offset_factor=16)
+                                            tgt = T.match_buffer(C_shared_dyn[0 : 16, ax1_0 * 16 : ax1_0 * 16 + 16], [16, 16], dtype="float32", strides=[s1, s0], scope="shared.dyn", offset_factor=16)
+                                            T.evaluate(T.tvm_store_matrix_sync(src.data, 16, 16, 16, src.elem_offset // 256 + src.elem_offset % 256 // 16, T.tvm_access_ptr(T.type_annotation(dtype="float32"), tgt.data, tgt.elem_offset, s1 * 16, 2, dtype="handle"), s1, "row_major", dtype="handle"))
+                                    for ax0_ax1_ax2_ax3_ax4_ax5_fused_0 in T.serial(16):
+                                        for ax0_ax1_ax2_ax3_ax4_ax5_fused_1 in T.thread_binding(8, thread="threadIdx.y"):
+                                            for ax0_ax1_ax2_ax3_ax4_ax5_fused_2 in T.thread_binding(32, thread="threadIdx.x"):
+                                                for ax0_ax1_ax2_ax3_ax4_ax5_fused_3 in T.vectorized(4):
+                                                    C[bx  * 128 + (ax0_0 * 16 + (((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) // 16 % 16), by * 128 + (((((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) // 16 // 16 % 8) * 16 + (((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) % 16)] = C_shared_dyn[(((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) // 16 % 16, ((((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) // 16 // 16 % 8) * 16 // 16 * 16 + (((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) % 16] + A[bx  * 128 + (ax0_0 * 16 + (((ax0_ax1_ax2_ax3_ax4_ax5_fused_0 * 8 + ax0_ax1_ax2_ax3_ax4_ax5_fused_1) * 32 + ax0_ax1_ax2_ax3_ax4_ax5_fused_2) * 4 + ax0_ax1_ax2_ax3_ax4_ax5_fused_3) // 16 % 16)]
+
+
 
 
 def _check(original, transformed):
     mod = tvm.tir.transform.LowerAutoCopy()(original)
+    print(mod.script())
     tvm.ir.assert_structural_equal(mod, transformed, True)
 
 
@@ -388,6 +447,10 @@ def test_auto_padding():
     verify_single_allocation(mod['main'].body, 16 * 130)
 
 
+def test_rewrite_wmma_to_global_fusion():
+    _check(WmmaToGlobalWithFusion, TransformedWmmaToGlobalWithFusion)
+
+
 if __name__ == "__main__":
     test_coalesce_vectorize()
     test_inverse()
@@ -396,3 +459,4 @@ if __name__ == "__main__":
     test_rewrite_wmma_to_shared()
     test_rewrite_wmma_to_global()
     test_auto_padding()
+    test_rewrite_wmma_to_global_fusion()

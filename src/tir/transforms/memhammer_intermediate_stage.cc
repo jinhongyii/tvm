@@ -131,8 +131,8 @@ class IndexPatternFinder : public ExprVisitor {
             index = index * Integer(o.operand);
             break;
           case Operator::OpKind::FloorDiv:
-            if (max % o.operand != 0 && o.operand % max!=0) {
-              success_=false;
+            if (max % o.operand != 0 && o.operand % max != 0) {
+              success_ = false;
               return;
             }
             max = max / o.operand;
@@ -140,7 +140,7 @@ class IndexPatternFinder : public ExprVisitor {
               extent = std::max(1l, max);
             }
             if (max % extent != 0) {
-              success_=false;
+              success_ = false;
               return;
             }
             index = floordiv(index, Integer(o.operand));
@@ -153,16 +153,16 @@ class IndexPatternFinder : public ExprVisitor {
             }
             if (step % o.operand == 0) {
               extent = 1;
-              max= 0;
-            } else{
-              extent = std::max(1l, std::min(extent, o.operand/step));
-              max = extent*step;
+              max = 0;
+            } else {
+              extent = std::max(1l, std::min(extent, o.operand / step));
+              max = extent * step;
             }
             index = floormod(index, Integer(o.operand));
         }
       }
       if (extent > 1) {
-        ICHECK(max%extent==0);
+        ICHECK(max % extent == 0);
         access_shape_.push_back(Integer(extent));
         resulting_index_->push_back(floordiv(index, max / extent));
       }
@@ -194,7 +194,24 @@ class IndexPatternFinder : public ExprVisitor {
   Array<PrimExpr> access_shape_;
   Array<PrimExpr>* resulting_index_;
   std::vector<Operator> operator_stack;
-  bool success_ =true;
+  bool success_ = true;
+};
+
+class BufferLoadReplacer : public StmtExprMutator {
+ public:
+  BufferLoadReplacer(const Buffer& tgt_buffer, const BufferLoad& new_buffer_load)
+      : tgt_buffer_(tgt_buffer), new_buffer_load_(new_buffer_load) {}
+
+  PrimExpr VisitExpr_(const BufferLoadNode* op) {
+    if (op->buffer.same_as(tgt_buffer_)) {
+      return new_buffer_load_;
+    }
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
+ private:
+  Buffer tgt_buffer_;
+  BufferLoad new_buffer_load_;
 };
 
 /*!
@@ -209,9 +226,8 @@ class IndexPatternFinder : public ExprVisitor {
  *         The second is the SeqStmt that contains 2 stages (one original and another inserted).
  */
 std::pair<Stmt, SeqStmt> InsertCacheStage(Stmt stmt, bool is_write_cache, String storage_scope,
-                                          Optional<For> compute_location, const Array<For>&
-                                              outer_loops,
-                                          Buffer* alloc_buffer) {
+                                          Optional<For> compute_location,
+                                          const Array<For>& outer_loops, Buffer* alloc_buffer) {
   Stmt body = stmt;
   std::vector<const ForNode*> loops;
   std::vector<const ForNode*> loops_under_compute_location;
@@ -253,16 +269,39 @@ std::pair<Stmt, SeqStmt> InsertCacheStage(Stmt stmt, bool is_write_cache, String
       }
     }
   }
-  
+
+  arith::Analyzer analyzer;
+  const BufferLoadNode* target_buffer_load = nullptr;
+  if (is_write_cache) {
+    tir::PreOrderVisit(stmt, [&](const ObjectRef& obj) {
+      if (const auto* buffer_load = obj.as<BufferLoadNode>()) {
+        if (buffer_load->buffer.scope() == "wmma.accumulator") {
+          if (target_buffer_load == nullptr) {
+            target_buffer_load = buffer_load;
+          } else {
+            CHECK(target_buffer_load->buffer.same_as(buffer_load->buffer))
+                << "More than one target buffer found";
+            ICHECK(target_buffer_load->indices.size() == buffer_load->indices.size());
+            for (size_t i = 0; i < target_buffer_load->indices.size(); i++) {
+              CHECK(
+                  analyzer.CanProveEqual(target_buffer_load->indices[i], buffer_load->indices[i]));
+            }
+          }
+        }
+      }
+      return true;
+    });
+    CHECK(target_buffer_load);
+  }
 
   const BufferStoreNode* buf_store = TVM_TYPE_AS(buf_store, body, BufferStoreNode);
   Array<PrimExpr> cache_indices;
   Array<PrimExpr> new_shape;
-  bool use_rank_promotion =false;
-  if (const BufferLoadNode* buf_load = buf_store->value.as<BufferLoadNode>()) {
-      Array<PrimExpr> indices = is_write_cache ? buf_store->indices : buf_load->indices;
-    new_shape =
-        IndexPatternFinder::getRankPromotedShape(indices, var_range, &cache_indices);
+  bool use_rank_promotion = false;
+  if (is_write_cache || buf_store->value.as<BufferLoadNode>()) {
+    Array<PrimExpr> indices =
+        is_write_cache ? buf_store->indices : buf_store->value.as<BufferLoadNode>()->indices;
+    new_shape = IndexPatternFinder::getRankPromotedShape(indices, var_range, &cache_indices);
     if (!new_shape.empty()) {
       use_rank_promotion = true;
     }
@@ -278,13 +317,13 @@ std::pair<Stmt, SeqStmt> InsertCacheStage(Stmt stmt, bool is_write_cache, String
       new_shape.push_back(loop->extent);
     }
   }
-  
+
   for (int i = 0; i < static_cast<int>(relaxed_thread_loops.size()); i++) {
     const ForNode* loop = relaxed_thread_loops[i];
     Var new_loop_var = loop->loop_var.copy_with_suffix("_cache");
     new_loop_vars.push_back(new_loop_var);
     subst_map.Set(loop->loop_var, new_loop_var);
-    if(!use_rank_promotion) {
+    if (!use_rank_promotion) {
       cache_indices.push_back(loop->loop_var);
     }
   }
@@ -293,7 +332,7 @@ std::pair<Stmt, SeqStmt> InsertCacheStage(Stmt stmt, bool is_write_cache, String
     Var new_loop_var = loop->loop_var.copy_with_suffix("_cache");
     new_loop_vars.push_back(new_loop_var);
     subst_map.Set(loop->loop_var, new_loop_var);
-    if(!use_rank_promotion) {
+    if (!use_rank_promotion) {
       cache_indices.push_back(loop->loop_var);
     }
   }
@@ -313,11 +352,18 @@ std::pair<Stmt, SeqStmt> InsertCacheStage(Stmt stmt, bool is_write_cache, String
   buffer_ptr->shape = new_shape;
   *alloc_buffer = new_buffer;
 
-  Stmt generate_body =
-      is_write_cache
-          ? BufferStore(buf_store->buffer, BufferLoad(new_buffer, subst_cache_indices),
-                        subst_indices)
-          : BufferStore(new_buffer, Substitute(buf_store->value, subst_map), subst_cache_indices);
+  Stmt generate_body;
+  if (is_write_cache) {
+    // copy from wmma to new cache buffer
+    BufferLoad new_buffer_load{new_buffer, cache_indices};
+    generate_body =
+        BufferLoadReplacer(target_buffer_load->buffer, new_buffer_load)(GetRef<Stmt>(buf_store));
+    generate_body = Substitute(generate_body, subst_map);
+  } else {
+    generate_body =
+        BufferStore(new_buffer, Substitute(buf_store->value, subst_map), subst_cache_indices);
+  }
+
   if (predicate.defined()) {
     // generated by coalescing
     CHECK_EQ(loops_under_compute_location.size(), 2);
@@ -325,11 +371,11 @@ std::pair<Stmt, SeqStmt> InsertCacheStage(Stmt stmt, bool is_write_cache, String
     PrimExpr subst_predicate = Substitute(predicate.value(), subst_map);
     generate_body = IfThenElse(subst_predicate, generate_body);
   }
-  
+
   for (int i = static_cast<int>(loops_under_compute_location.size()) - 1; i >= 0; i--) {
     const ForNode* orig_loop = loops_under_compute_location[i];
     ObjectPtr<ForNode> new_loop = make_object<ForNode>(*orig_loop);
-    new_loop->loop_var = new_loop_vars[i+relaxed_thread_loops.size()];
+    new_loop->loop_var = new_loop_vars[i + relaxed_thread_loops.size()];
     new_loop->body = generate_body;
     generate_body = For(new_loop);
   }
@@ -343,10 +389,14 @@ std::pair<Stmt, SeqStmt> InsertCacheStage(Stmt stmt, bool is_write_cache, String
     new_loop->annotations = {};
     generate_body = For(new_loop);
   }
-  Stmt rewrite_body =
-      is_write_cache
-          ? BufferStore(new_buffer, buf_store->value,   cache_indices)
-          : BufferStore(buf_store->buffer, BufferLoad(new_buffer, cache_indices), buf_store->indices);
+  Stmt rewrite_body;
+  if (is_write_cache) {
+    BufferLoad new_buffer_load{new_buffer, cache_indices};
+    rewrite_body = BufferStore(new_buffer, GetRef<BufferLoad>(target_buffer_load), cache_indices);
+  } else {
+    rewrite_body =
+        BufferStore(buf_store->buffer, BufferLoad(new_buffer, cache_indices), buf_store->indices);
+  }
   if (predicate.defined()) {
     rewrite_body = IfThenElse(predicate.value(), rewrite_body);
   }
@@ -364,7 +414,7 @@ std::pair<Stmt, SeqStmt> InsertCacheStage(Stmt stmt, bool is_write_cache, String
   }
   generate_body = CopyLoopChain(loops, generate_body);
   return std::make_pair(generate_body, insert_location);
-  
+
 //  const BufferLoadNode* buf_load = TVM_TYPE_AS(buf_load, buf_store->value, BufferLoadNode);
 //  Buffer orig_buffer = is_write_cache ? buf_store->buffer : buf_load->buffer;
 //  Buffer another_buffer = is_write_cache ? buf_load->buffer : buf_store->buffer;

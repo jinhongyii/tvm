@@ -218,7 +218,16 @@ Stmt RewriteWmmaStore(Stmt stmt) {
   };
   // TODO: the assumption that the RHS of BufferStore is BufferLoad may not be accurate
   const BufferStoreNode* buf_store = TVM_TYPE_AS(buf_store, body, BufferStoreNode);
-  const BufferLoadNode* buf_load = TVM_TYPE_AS(buf_load, buf_store->value, BufferLoadNode);
+  const BufferLoadNode* buf_load = nullptr;
+  PostOrderVisit(buf_store->value, [&](const ObjectRef& obj) {
+    const BufferLoadNode* load = obj.as<BufferLoadNode>();
+    if (load && load->buffer.scope() == "wmma.accumulator") {
+      ICHECK(buf_load == nullptr || buf_load->buffer.same_as(load->buffer))
+        << "More than one source buffer of wmma accumulator found";
+      buf_load = load;
+    }
+    return true;
+  });
   Buffer src_buffer = buf_load->buffer;
   Buffer tgt_buffer = buf_store->buffer;
 
@@ -243,7 +252,6 @@ Stmt RewriteWmmaStore(Stmt stmt) {
 
   Array<Range> read_region = RelaxIndices(buf_load->indices, src_buffer->shape, var_dom);
   Array<Range> write_region = RelaxIndices(buf_store->indices, tgt_buffer->shape, var_dom);
-
   Stmt wmma_body = BlockRealize(
       /*iter_values=*/{},  //
       /*predicate=*/Bool(true),
