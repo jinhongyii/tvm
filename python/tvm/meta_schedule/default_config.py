@@ -264,6 +264,7 @@ class _DefaultLLVM:
             M.DisallowDynamicLoop(),
             M.RewriteParallelVectorizeUnroll(),
             M.RewriteReductionBlock(),
+            M.RewriteLayout(),
         ]
 
     @staticmethod
