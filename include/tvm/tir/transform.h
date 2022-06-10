@@ -635,6 +635,7 @@ TVM_DLL Pass LowerAutoCopy();
 TVM_DLL Pass RenormalizeSplitPattern();
 
 /*!
+
  * \brief Annotate a PrimFunc with a given target.
  * \return The pass.
  */
@@ -659,7 +660,7 @@ TVM_DLL Pass Filter(runtime::TypedPackedFunc<bool(PrimFunc)> fcond);
 TVM_DLL Pass InjectPTXAsyncCopy();
 
 /*!
- * \brief Remove the preproc block
+ * \brief Remove the weight layout rewrite block
  * \return The pass.
  */
 TVM_DLL Pass RemoveWeightLayoutRewriteBlock();
