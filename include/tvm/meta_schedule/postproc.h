@@ -162,6 +162,13 @@ class Postproc : public runtime::ObjectRef {
    */
   TVM_DLL static Postproc VerifyGPUCode();
 
+  /*!
+   * \brief Creates a postprocessor that rewrites the layout of input tensor
+   * \note Weight layout rewrite is supported so far, activation layout rewrite will be added.
+   * \return The postprocessor created
+   */
+  TVM_DLL static Postproc RewriteLayout();
+
   TVM_DLL static Postproc InjectKernelCode(String string);
   TVM_DEFINE_MUTABLE_OBJECT_REF_METHODS(Postproc, ObjectRef, PostprocNode);
 };
