@@ -657,11 +657,16 @@ def tune_relax(
         postprocs=postprocs,
         mutator_probs=mutator_probs,
         num_threads=num_threads,
+        
     )
-
     with PassContext(opt_level=3):
         relax_mod = relax.transform.MetaScheduleApplyHistoryBest(database, target)(mod)
         relax_mod = relax.transform.SplitLayoutRewritePreproc()(relax_mod)
         relax_mod = relax.transform.FoldConstant()(relax_mod)
+        # relax_mod = relax.transform.AnnotateTIROpPattern()(relax_mod)
+        relax_mod = relax.transform.FuseOps()(relax_mod)
+        relax_mod = relax.transform.FuseTIR()(relax_mod)
+        relax_mod = relax.transform.ComputeInlineLayoutRewrite()(relax_mod)
+        print(relax_mod.script())
         relax_ex = relax_build(relax_mod, target=target)
     return relax_ex

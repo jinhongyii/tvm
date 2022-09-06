@@ -114,14 +114,9 @@ bool RewriteLayout(const Schedule& sch) {
     if (prim_func == nullptr) {
       continue;
     }
-    // Only rewrite PrimFuncs with attr "layout_free_buffers"
-    Array<Integer> layout_free_buffer_index =
-        prim_func->GetAttr(attr::layout_free_buffers, Array<Integer>()).value();
-
     Array<Buffer> layout_free_buffers;
-    for (const Integer& index : layout_free_buffer_index) {
-      const Var& param = prim_func->params[index->value];
-      layout_free_buffers.push_back(prim_func->buffer_map.at(param));
+    for (int i = 0; i < static_cast<int>(prim_func->params.size()) - 1; i++) {
+      layout_free_buffers.push_back(prim_func->buffer_map.at(prim_func->params[i]));
     }
     // Collect Buffer read positions
     BufferReadPosCollector collector(layout_free_buffers);
@@ -130,7 +125,7 @@ bool RewriteLayout(const Schedule& sch) {
     const auto& index_maps = collector.GetBufferIndexMap();
     // Check all buffers are collected
     if (locations.size() != layout_free_buffers.size() ||
-        index_maps.size() != layout_free_buffer_index.size()) {
+        index_maps.size() != layout_free_buffers.size()) {
       return false;
     }
 
