@@ -21,6 +21,7 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include <tvm/relay/op_attr_types.h>
 
 namespace tvm {
 namespace tir {
@@ -53,6 +54,7 @@ class PreprocFunctionCreator : public StmtExprVisitor {
     // Step 1. Create a new block and remove "preproc" attrs
     auto block_ptr = make_object<BlockNode>(*block.get());
     block_ptr->annotations.erase(tir::attr::meta_schedule_layout_rewrite_preproc);
+    block_ptr->annotations.Set("from_preproc", Bool(true));
     Block new_block(block_ptr);
 
     // Step 2. Create block realize and loop nesting
@@ -81,6 +83,7 @@ class PreprocFunctionCreator : public StmtExprVisitor {
                   /*body=*/std::move(body),
                   /*ret_type=*/VoidType(),
                   /*buffer_map=*/std::move(buffer_map));
+    func = WithAttr(std::move(func), "op_pattern", Integer(static_cast<int>(relay::kElemWise)));
     func = tir::RenewDefs(func);
 
     // Step 4. Store the result to the output map
@@ -123,6 +126,11 @@ class SplitPreprocMutator : public ExprMutator {
       if (kv.second.as<relax::FunctionNode>()) {
         auto updated_func = Downcast<Function>(mutator(func));
         mutator.builder_->UpdateFunction(gv, updated_func);
+      } else if(const auto* tir_f = kv.second.as<tir::PrimFuncNode>()) {
+        if(!tir_f->HasNonzeroAttr("op_pattern")) {
+          auto updated_func = WithAttr(Downcast<tir::PrimFunc>(func), "op_pattern", Integer(static_cast<int>(relay::kOutEWiseFusable)));
+          mutator.builder_->UpdateFunction(gv, updated_func);
+        }
       }
     }
     mod = mutator.builder_->GetContextIRModule();
