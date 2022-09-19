@@ -177,6 +177,8 @@ class IndexMap : public ObjectRef {
    */
   std::pair<IndexMap, PrimExpr> NonSurjectiveInverse(Array<Range> initial_ranges) const;
 
+
+  IndexMap ComposeIndexMap(const IndexMap& other) const;
   TVM_DEFINE_OBJECT_REF_METHODS(IndexMap, ObjectRef, IndexMapNode);
 };
 

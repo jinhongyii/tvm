@@ -50,8 +50,9 @@ class WeightLayoutRewriteBlockRemover : public StmtMutator {
   Stmt VisitStmt_(const BlockNode* op) final {
     Block block = Downcast<Block>(StmtMutator::VisitStmt_(op));
 
-    auto it = block->annotations.find(attr::meta_schedule_layout_rewrite_preproc);
-    if (it == block->annotations.end() || !is_one(Downcast<PrimExpr>((*it).second))) {
+    auto it1 = block->annotations.find(attr::meta_schedule_layout_rewrite_preproc);
+    auto it2 = block->annotations.find(attr::meta_schedule_layout_rewrite_postproc);
+    if ((it1 == block->annotations.end() || !is_one(Downcast<PrimExpr>((*it1).second))) && (it2 ==block->annotations.end() || !is_one(Downcast<PrimExpr>((*it2).second)))) {
       // The block is not a weight layout block
       // Remove allocates if needed
       Array<Buffer> alloc_buffers;
@@ -82,8 +83,14 @@ class WeightLayoutRewriteBlockRemover : public StmtMutator {
     ICHECK(load);
 
     // Step 3. Update Buffer
-    buf_map_.Set(load->buffer, store->buffer);
-    rewritten_buffers_.insert(store->buffer);
+    bool is_postproc = it2 != block->annotations.end();
+    if(is_postproc){
+      buf_map_.Set(store->buffer, load->buffer);
+      rewritten_buffers_.insert(load->buffer);
+    }else{
+      buf_map_.Set(load->buffer, store->buffer);
+      rewritten_buffers_.insert(store->buffer);
+    }
 
     // Step 4. Set block body as no_op
     auto n = CopyOnWrite(block.get());

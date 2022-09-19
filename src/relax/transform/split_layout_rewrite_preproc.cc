@@ -30,21 +30,26 @@ namespace tir {
 class PreprocFunctionCreator : public StmtExprVisitor {
  public:
   /*!
-   * \brief Create PrimFuncs for layout rewrite preproc.
+   * \brief Create PrimFuncs for layout rewrite preproc/postproc.
    * \param func The original input function.
+   * \param annotation The annotation for preproc/postproc block.
    * \return A map from weight buffer to it's rewrite funcs.
    */
-  static Map<Buffer, PrimFunc> GetFuncs(const PrimFunc& func) {
-    PreprocFunctionCreator creator;
+  static Map<Buffer, PrimFunc> GetFuncs(const PrimFunc& func, bool is_preproc) {
+    PreprocFunctionCreator creator(is_preproc);
     CHECK(func->body->IsInstance<BlockRealizeNode>())
         << "Schedulable PrimFuncs are expected. i.e.the body of function should be a root block.";
     BlockRealize root_realize = Downcast<BlockRealize>(func->body);
+
     creator(root_realize->block->body);
-    return creator.preproc_funcs_;
+    return creator.funcs_;
   }
 
  private:
-  explicit PreprocFunctionCreator() = default;
+  explicit PreprocFunctionCreator(bool is_preproc): is_preproc_(is_preproc) {
+    annotation = is_preproc?tir::attr::meta_schedule_layout_rewrite_preproc:
+                                  tir::attr::meta_schedule_layout_rewrite_postproc;
+  }
 
   void CreatePreprocFunction(const BlockRealizeNode* op) {
     const Block& block = op->block;
@@ -53,7 +58,13 @@ class PreprocFunctionCreator : public StmtExprVisitor {
 
     // Step 1. Create a new block and remove "preproc" attrs
     auto block_ptr = make_object<BlockNode>(*block.get());
-    block_ptr->annotations.erase(tir::attr::meta_schedule_layout_rewrite_preproc);
+    
+    if(!block_ptr->annotations.count(annotation)) {
+      LOG(INFO)<<"NO annotation: "<<annotation;
+      return;
+
+    }
+    block_ptr->annotations.erase(annotation);
     block_ptr->annotations.Set("from_preproc", Bool(true));
     Block new_block(block_ptr);
 
@@ -84,11 +95,12 @@ class PreprocFunctionCreator : public StmtExprVisitor {
                   /*ret_type=*/VoidType(),
                   /*buffer_map=*/std::move(buffer_map));
     func = WithAttr(std::move(func), "op_pattern", Integer(static_cast<int>(relay::kElemWise)));
+    func = WithAttr(std::move(func), "layout_rewrite", Bool(true));
     func = tir::RenewDefs(func);
 
     // Step 4. Store the result to the output map
     // Note: we use original buffer as key rather than the new created buffer.
-    preproc_funcs_.Set(block->reads[0]->buffer, std::move(func));
+    funcs_.Set(is_preproc_?block->reads[0]->buffer:block->writes[0]->buffer, std::move(func));
   }
 
   void VisitStmt_(const ForNode* op) final {
@@ -100,7 +112,8 @@ class PreprocFunctionCreator : public StmtExprVisitor {
   void VisitStmt_(const BlockRealizeNode* op) final {
     // preproc block will only appear directly under root block, so we don't recursively visit
     Block block = op->block;
-    auto it = block->annotations.find(tir::attr::meta_schedule_layout_rewrite_preproc);
+
+    auto it = block->annotations.find(annotation);
     if (it != block->annotations.end() && is_one(Downcast<PrimExpr>((*it).second))) {
       CreatePreprocFunction(op);
     }
@@ -108,8 +121,10 @@ class PreprocFunctionCreator : public StmtExprVisitor {
 
   /*! \brief loop stack */
   Array<For> loop_stack_;
-  /*! \brief The created preproc functions. */
-  Map<Buffer, PrimFunc> preproc_funcs_;
+  /*! \brief The created preproc/postproc functions. */
+  Map<Buffer, PrimFunc> funcs_;
+  bool is_preproc_;
+  String annotation;
 };
 }  // namespace tir
 
@@ -172,8 +187,9 @@ class SplitPreprocMutator : public ExprMutator {
     Optional<tir::PrimFunc> opt_f = MatchPrimFunc(Downcast<GlobalVar>(call->args[0]));
     CHECK(opt_f.defined()) << "Cannot find PrimFuncs used in call_tir";
     const tir::PrimFunc& f = opt_f.value();
-    Map<tir::Buffer, tir::PrimFunc> preproc_funcs = tir::PreprocFunctionCreator::GetFuncs(f);
-
+    Map<tir::Buffer, tir::PrimFunc> preproc_funcs = tir::PreprocFunctionCreator::GetFuncs(f, true);
+    Map<tir::Buffer, tir::PrimFunc> postproc_funcs = tir::PreprocFunctionCreator::GetFuncs(f, false);
+    ICHECK_EQ(postproc_funcs.size(), 1);
     // Step 2. Updating all layout free buffers
     Array<Expr> call_tir_args = GetTIRArgs(call);
     for (const auto& kv : preproc_funcs) {
@@ -196,6 +212,27 @@ class SplitPreprocMutator : public ExprMutator {
       // Step 2.3 update call_tir arguments to use rewritten weight
       call_tir_args.Set(idx, new_var);
     }
+    for(const auto&kv: postproc_funcs){
+      const tir::Buffer& buffer = kv.first;
+      const tir::PrimFunc& func = kv.second;
+      // Step 2.1 Get the index of the layout free buffer
+      int idx = GetBufferIndex(f, buffer);
+      ICHECK_EQ(idx, f->params.size()-1);
+      // The layout rewrite function has only one input and one output.
+      ICHECK_EQ(func->params.size(), 2);
+      // Step 2.2 Emit layout rewrite postproc function to relax
+      const ShapeExpr& out_shape = GetInputShapeFromPostprocFunc(func);
+      Var input_of_layout_rewrite_func = builder_->Emit(Call(/*op=*/call_tir_op,                                             //
+                /*args=*/{call->args[0], Tuple(call_tir_args), out_shape},  //
+                /*attrs=*/{},                                                   //
+                /*type_args=*/call->type_args));
+      const GlobalVar& layout_rewrite_func = builder_->AddFunction(func, "layout_rewrite");
+      const Array<Expr> args = {layout_rewrite_func, Tuple({input_of_layout_rewrite_func}), call->args[2]};
+      return Call(/*op=*/call_tir_op,
+                  /*args=*/args,
+                  /*attrs=*/{},
+                  /*type_args=*/call->type_args);
+    }
     // Step 3. Updating original call and use rewritten weight expr.
     return Call(/*op=*/call_tir_op,                                             //
                 /*args=*/{call->args[0], Tuple(call_tir_args), call->args[2]},  //
@@ -206,6 +243,22 @@ class SplitPreprocMutator : public ExprMutator {
   static ShapeExpr GetOutputShapeFromPreprocFunc(const tir::PrimFunc& func) {
     ICHECK_EQ(func->params.size(), 2);
     tir::Buffer buffer = func->buffer_map.Get(func->params[1]).value();
+    // Convert to i64 if is constant
+    // TODO(Siyuan): support symbolic shape
+    Array<PrimExpr> shape;
+    for (const PrimExpr& e : buffer->shape) {
+      if (const auto* imm = e.as<IntImmNode>()) {
+        shape.push_back(tir::make_const(DataType::Int(64), imm->value));
+      } else {
+        shape.push_back(e);
+      }
+    }
+    return ShapeExpr(shape);
+  }
+
+    static ShapeExpr GetInputShapeFromPostprocFunc(const tir::PrimFunc& func) {
+    ICHECK_EQ(func->params.size(), 2);
+    tir::Buffer buffer = func->buffer_map.Get(func->params[0]).value();
     // Convert to i64 if is constant
     // TODO(Siyuan): support symbolic shape
     Array<PrimExpr> shape;

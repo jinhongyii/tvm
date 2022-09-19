@@ -1522,8 +1522,12 @@ constexpr const char* meta_schedule_unroll_implicit = "meta_schedule.unroll_impl
 /*! \brief Mark that a block should be further rewritten using tensorization. */
 constexpr const char* meta_schedule_auto_tensorize = "meta_schedule.auto_tensorize";
 
-/*! \brief Mark that a block is a preprocessor block for layout rewrite. */
+/*! \brief Mark that a block is a preprocessor block for input layout rewrite. */
 constexpr const char* meta_schedule_layout_rewrite_preproc = "meta_schedule.layout_rewrite_preproc";
+
+/*! \brief Mark that a block is a postprocessor block for output layout rewrite. */
+constexpr const char* meta_schedule_layout_rewrite_postproc = "meta_schedule.layout_rewrite_postproc";
+
 /*!
  * \brief Mark that the block need to add predicate for block var bounds during lowering
  */
