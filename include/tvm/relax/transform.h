@@ -179,6 +179,8 @@ TVM_DLL Pass SplitLayoutRewritePreproc();
 
 TVM_DLL Pass ComputeInlineLayoutRewrite();
 
+TVM_DLL Pass LayoutRewritePropogate();
+
 }  // namespace transform
 }  // namespace relax
 }  // namespace tvm

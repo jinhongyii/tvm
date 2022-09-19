@@ -276,6 +276,9 @@ def SplitLayoutRewritePreproc() -> tvm.ir.transform.Pass:
 def ComputeInlineLayoutRewrite() -> tvm.ir.transform.Pass:
     return _ffi_api.ComputeInlineLayoutRewrite()
 
+def LayoutRewritePropogate() -> tvm.ir.transform.Pass:
+    return _ffi_api.LayoutRewritePropogate()
+
 def _wrap_class_function_pass(pass_cls, pass_info):
     """Wrap a python class as function pass."""
 

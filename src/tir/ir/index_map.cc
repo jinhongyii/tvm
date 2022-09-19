@@ -158,6 +158,10 @@ IndexMap IndexMap::Inverse(Array<Range> initial_ranges) const {
   return IndexMap(output_vars, inverse_exprs);
 }
 
+IndexMap IndexMap::ComposeIndexMap(const IndexMap& other) const {
+  return IndexMap((*this)->initial_indices, other->MapIndices((*this)->final_indices));
+}
+
 Array<PrimExpr> IndexMapNode::MapIndices(const Array<PrimExpr>& indices,
                                          arith::Analyzer* analyzer) const {
   ICHECK_EQ(indices.size(), initial_indices.size());
