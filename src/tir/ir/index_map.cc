@@ -113,7 +113,7 @@ std::pair<IndexMap, PrimExpr> IndexMap::NonSurjectiveInverse(Array<Range> initia
   return {IndexMap(output_vars, inverse_exprs), padding_predicate};
 }
 
-IndexMap IndexMap::Inverse(Array<Range> initial_ranges) const {
+IndexMap IndexMap:: Inverse(Array<Range> initial_ranges) const {
   // Dummy variables to represent the inverse's inputs.
   Array<Var> output_vars;
   for (size_t i = 0; i < (*this)->final_indices.size(); i++) {
@@ -158,8 +158,8 @@ IndexMap IndexMap::Inverse(Array<Range> initial_ranges) const {
   return IndexMap(output_vars, inverse_exprs);
 }
 
-IndexMap IndexMap::ComposeIndexMap(const IndexMap& other) const {
-  return IndexMap((*this)->initial_indices, other->MapIndices((*this)->final_indices));
+IndexMap IndexMap::ComposeIndexMap(const IndexMap& other, arith::Analyzer* analyzer) const {
+  return IndexMap((*this)->initial_indices, other->MapIndices((*this)->final_indices, analyzer));
 }
 
 Array<PrimExpr> IndexMapNode::MapIndices(const Array<PrimExpr>& indices,

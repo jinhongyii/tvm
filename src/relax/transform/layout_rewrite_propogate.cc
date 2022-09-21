@@ -17,6 +17,7 @@
  * under the License.
  */
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/relax/expr_functor.h>
 #include <tvm/relax/transform.h>
 #include <tvm/tir/op.h>
@@ -26,13 +27,16 @@
 namespace tvm {
 
 namespace tir{
-    IndexMap ExtractIndexMap(const PrimFunc& func){
+    IndexMap ExtractIndexMap(const PrimFunc& func, arith::Analyzer* analyzer){
         struct BufferIndexFinder: public StmtExprVisitor{
+
+            explicit BufferIndexFinder(arith::Analyzer* analyzer) : analyzer_(analyzer) {}
 
             void VisitStmt_(const BlockNode* op) final{
               StmtVisitor::VisitStmt_(op);
               for(const auto& iter: op->iter_vars){
                 initial_ranges_.push_back(iter->dom);
+                analyzer_->Bind(iter->var, iter->dom);
               }
             }
 
@@ -64,8 +68,9 @@ namespace tir{
              Array<PrimExpr> final_indices_;
              Array<Range> initial_ranges_;
              bool need_inverse_ = false;
+             arith::Analyzer* analyzer_;
         };
-        BufferIndexFinder finder;
+        BufferIndexFinder finder(analyzer);
         finder(func->body);
         if(finder.need_inverse_){
           return IndexMap(finder.initial_indices_, finder.final_indices_).Inverse(finder.initial_ranges_);
@@ -104,15 +109,33 @@ namespace tir{
       return func;
     }
 
-    PrimFunc FuseLayoutRewriteFuncs(const PrimFunc& func1, const PrimFunc& func2){
-        IndexMap index_map1 = ExtractIndexMap(func1);
-        IndexMap index_map2 = ExtractIndexMap(func2);
-        ICHECK_EQ(index_map1->final_indices.size(), index_map2->initial_indices.size())
-            << func1 << std::endl << func2;
-        IndexMap final_index_map = index_map1.ComposeIndexMap(index_map2);
-        Buffer src_buffer = func1->buffer_map[func1->params[0]];
-        Buffer dst_buffer = func2->buffer_map[func2->params[1]];
-        return CreateLayoutRewriteFunc(final_index_map, src_buffer, dst_buffer);
+    bool IsIdenticalMapping(IndexMap index_map){
+      if(index_map->initial_indices.size() != index_map->final_indices.size()){
+        return false;
+      }
+      for(int i = 0; i < index_map->initial_indices.size(); i++){
+        if(!index_map->initial_indices[i].same_as(index_map->final_indices[i])){
+          return false;
+        }
+      }
+      return true;
+    }
+
+    Optional<PrimFunc> FuseLayoutRewriteFuncs(const PrimFunc& func1, const PrimFunc& func2){
+      arith::Analyzer analyzer;
+      IndexMap index_map1 = ExtractIndexMap(func1, &analyzer);
+      IndexMap index_map2 = ExtractIndexMap(func2, &analyzer);
+      LOG(INFO) << index_map1;
+      LOG(INFO) << index_map2;
+      ICHECK_EQ(index_map1->final_indices.size(), index_map2->initial_indices.size());
+      IndexMap final_index_map = index_map2.ComposeIndexMap(index_map1, &analyzer);
+      LOG(INFO)<<final_index_map;
+      if (IsIdenticalMapping(final_index_map)) {
+        return NullOpt;
+        }
+      Buffer src_buffer = func1->buffer_map[func1->params[0]];
+      Buffer dst_buffer = func2->buffer_map[func2->params[1]];
+      return CreateLayoutRewriteFunc(final_index_map, src_buffer, dst_buffer);
     }
 } // namespace tir
 namespace relax {
@@ -194,8 +217,12 @@ class Propogator : public ExprMutator {
           tir::PrimFunc last_func =
               MatchPrimFunc(Downcast<GlobalVar>(last_call->args[0]))
                   .value();
-          tir::PrimFunc new_func = tir::FuseLayoutRewriteFuncs(last_func, f);
-          GlobalVar new_func_var = builder_->AddFunction(new_func, "fused_layout_rewrite");
+          Optional<tir::PrimFunc> new_func_opt = tir::FuseLayoutRewriteFuncs(last_func, f);
+          if(!new_func_opt.defined()){
+            no_emit_ = true;
+            return new_call;
+          }
+          GlobalVar new_func_var = builder_->AddFunction(new_func_opt.value(), "fused_layout_rewrite");
           new_call = Call(call_tir_op, {new_func_var, last_call->args[1], new_call->args[2]}, new_call->attrs, new_call->type_args);
           return new_call;
         } else {
@@ -217,6 +244,10 @@ class Propogator : public ExprMutator {
     void VisitBinding_(const VarBindingNode* binding) final {
       Expr new_value = this->VisitExpr(binding->value);
       Var new_var = this->VisitVarDef(binding->var);
+      if(no_emit_){
+        no_emit_ = false;
+        return;
+      }
       if(last_unresolved_layout_rewrite_.count(new_value)){
         if(new_var.as<DataflowVarNode>()){
           last_unresolved_layout_rewrite_.Set(new_var, last_unresolved_layout_rewrite_[new_value]);
@@ -249,8 +280,7 @@ class Propogator : public ExprMutator {
 
     const IRModule& mod_;
     Map<Expr, Call> last_unresolved_layout_rewrite_;
-
-
+    bool no_emit_ = false;
 };
 
 namespace transform {
