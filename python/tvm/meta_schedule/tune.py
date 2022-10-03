@@ -660,7 +660,8 @@ def tune_relax(
         
     )
     with PassContext(opt_level=3):
-        relax_mod = relax.transform.MetaScheduleApplyHistoryBest(database, target)(mod)
+        relax_mod = relax.transform.MetaScheduleApplyHistoryBest(database, target)(mod)        
+        print(relax_mod.script())
         relax_mod = relax.transform.SplitLayoutRewritePreproc()(relax_mod)
         relax_mod = relax.transform.FoldConstant()(relax_mod)
         relax_mod = relax.transform.LayoutRewritePropogate()(relax_mod)

@@ -25,21 +25,16 @@ namespace tir {
  * \brief Collect the block and index where the buffer is read.
  * \note The buffers are expected to be read by only one BufferLoad
  */
-class BufferPosCollector : public StmtExprVisitor {
+class BufferReadPosCollector : public StmtExprVisitor {
  public:
-  BufferPosCollector(const Array<Buffer>& input_buffers, const Buffer& output_buffer) {
-    for (const Buffer& buf : input_buffers) {
-      read_buffers_.insert(buf.get());
+  BufferReadPosCollector(const Array<Buffer>& buffers) {
+    for (const Buffer& buf : buffers) {
+      buffers_.insert(buf.get());
     }
-    write_buffer_ = output_buffer.get();
   }
 
-  const std::unordered_map<const BufferNode*, std::pair<Block, int>>& GetReadBufferLocations() const {
-    return read_buffer_locs_;
-  }
-
-  const std::unordered_map<const BufferNode*, std::pair<Block, int>>& GetWriteBufferLocations() const {
-    return write_buffer_locs_;
+  const std::unordered_map<const BufferNode*, std::pair<Block, int>>& GetBufferLocations() const {
+    return buffer_locs_;
   }
 
   const std::unordered_map<const BufferNode*, Optional<IndexMap>>& GetBufferIndexMap() const {
@@ -62,7 +57,7 @@ class BufferPosCollector : public StmtExprVisitor {
 
   void VisitExpr_(const BufferLoadNode* op) final {
     const Buffer& buffer = op->buffer;
-    if (read_buffers_.count(buffer.get())) {
+    if (buffers_.count(buffer.get())) {
       Map<Var, PrimExpr> subst_map;
       for (size_t i = 0; i < cur_realize_->iter_values.size(); i++) {
         const Var& var = cur_realize_->block->iter_vars[i]->var;
@@ -78,48 +73,16 @@ class BufferPosCollector : public StmtExprVisitor {
                                                          /*loops=*/loop_stack_,                  //
                                                          /*predicate=*/cur_realize_->predicate,  //
                                                          /*analyzer=*/&analyzer_);
-      int buffer_index = GetBufferIndex(cur_realize_->block, buffer, false);
+      int buffer_index = GetReadBufferIndex(cur_realize_->block, buffer);
       ICHECK(buffer_index != -1);
-      read_buffer_locs_[buffer.get()] = std::make_pair(cur_realize_->block, buffer_index);
+      buffer_locs_[buffer.get()] = std::make_pair(cur_realize_->block, buffer_index);
     }
-  }
-  void VisitStmt_(const BufferStoreNode* op) final {
-    const Buffer& buffer = op->buffer;
-    if(write_buffer_ == buffer.get()) {
-      Map<Var, PrimExpr> subst_map;
-      for (size_t i = 0; i < cur_realize_->iter_values.size(); i++) {
-        const Var& var = cur_realize_->block->iter_vars[i]->var;
-        const PrimExpr& value = cur_realize_->iter_values[i];
-        subst_map.Set(var, value);
-      }
-      Array<PrimExpr> subst_indices;
-      for (const PrimExpr& e : op->indices) {
-        subst_indices.push_back(Substitute(e, subst_map));
-      }
-      buffer_index_maps_[buffer.get()] = SuggestIndexMap(/*buffer=*/buffer,                      //
-                                                         /*indices=*/subst_indices,              //
-                                                         /*loops=*/loop_stack_,                  //
-                                                         /*predicate=*/cur_realize_->predicate,  //
-                                                         /*analyzer=*/&analyzer_);
-      int buffer_index = GetBufferIndex(cur_realize_->block, buffer, true);
-      ICHECK(buffer_index != -1);
-      write_buffer_locs_[buffer.get()] = std::make_pair(cur_realize_->block, buffer_index);
-    }
-    StmtVisitor::VisitStmt_(op);
   }
 
-  static int GetBufferIndex(const Block& block, const Buffer& buffer, bool is_write) {
-    if(is_write){
-      for(size_t i = 0; i < block->writes.size(); i++) {
-        if(block->writes[i]->buffer.same_as(buffer)) {
-          return i;
-        } 
-      }
-    }else{
-      for (size_t i = 0; i < block->reads.size(); i++) {
-        if (block->reads[i]->buffer.same_as(buffer)) {
-          return i;
-        }
+  static int GetReadBufferIndex(const Block& block, const Buffer& buffer) {
+    for (size_t i = 0; i < block->reads.size(); i++) {
+      if (block->reads[i]->buffer.same_as(buffer)) {
+        return i;
       }
     }
     return -1;
@@ -127,11 +90,9 @@ class BufferPosCollector : public StmtExprVisitor {
 
  private:
   /*! \brief All interested buffer. */
-  std::unordered_set<const BufferNode*> read_buffers_;
-  const BufferNode* write_buffer_;
+  std::unordered_set<const BufferNode*> buffers_;
   /*! \brief The result mapping from buffer to its inner-most block and read index. */
-  std::unordered_map<const BufferNode*, std::pair<Block, int>> read_buffer_locs_;
-  std::unordered_map<const BufferNode*, std::pair<Block, int>> write_buffer_locs_;
+  std::unordered_map<const BufferNode*, std::pair<Block, int>> buffer_locs_;
   /*! \brief The result mapping from buffer to its IndexMap. */
   std::unordered_map<const BufferNode*, Optional<IndexMap>> buffer_index_maps_;
 
@@ -153,22 +114,27 @@ bool RewriteLayout(const Schedule& sch) {
     if (prim_func == nullptr) {
       continue;
     }
-    Array<Buffer> input_buffers;
-    for (int i = 0; i < static_cast<int>(prim_func->params.size())-1; i++) {
-      input_buffers.push_back(prim_func->buffer_map.at(prim_func->params[i]));
+    // Only rewrite PrimFuncs with attr "layout_free_buffers"
+    Array<Integer> layout_free_buffer_index =
+        prim_func->GetAttr(attr::layout_free_buffers, Array<Integer>()).value();
+
+    Array<Buffer> layout_free_buffers;
+    for (const Integer& index : layout_free_buffer_index) {
+      const Var& param = prim_func->params[index->value];
+      layout_free_buffers.push_back(prim_func->buffer_map.at(param));
     }
-    Buffer output_buffer = prim_func->buffer_map.at(prim_func->params.back());
     // Collect Buffer read positions
-    BufferPosCollector collector(input_buffers, output_buffer);
+    BufferReadPosCollector collector(layout_free_buffers);
     collector(prim_func->body);
-    const auto& read_locations = collector.GetReadBufferLocations();
+    const auto& locations = collector.GetBufferLocations();
     const auto& index_maps = collector.GetBufferIndexMap();
     // Check all buffers are collected
-    if (read_locations.size() != input_buffers.size()) {
+    if (locations.size() != layout_free_buffers.size() ||
+        index_maps.size() != layout_free_buffer_index.size()) {
       return false;
     }
 
-    for (const auto& kv : read_locations) {
+    for (const auto& kv : locations) {
       const Buffer& buffer = GetRef<Buffer>(kv.first);
       const Block& block = kv.second.first;
       int buffer_index = kv.second.second;
@@ -184,23 +150,6 @@ bool RewriteLayout(const Schedule& sch) {
       BlockRV cached_block_rv = sch->CacheRead(block_rv, buffer_index, "global");
       sch->TransformLayout(block_rv, buffer_index, BufferIndexType::kRead, index_map.value());
       sch->Annotate(cached_block_rv, attr::meta_schedule_layout_rewrite_preproc, const_true());
-    }
-    for (const auto& kv : collector.GetWriteBufferLocations()) {
-      const Buffer& buffer = GetRef<Buffer>(kv.first);
-      const Block& block = kv.second.first;
-      int buffer_index = kv.second.second;
-
-      // Get IndexMap
-      const Optional<IndexMap> index_map = index_maps.at(buffer.get());
-      if (!index_map.defined()) {
-        continue;
-      }
-
-      // Apply schedule
-      BlockRV block_rv = sch->GetBlock(block->name_hint, func_name);
-      BlockRV cached_block_rv = sch->CacheWrite(block_rv, buffer_index, "global");
-      sch->TransformLayout(block_rv, buffer_index, BufferIndexType::kWrite, index_map.value());
-      sch->Annotate(cached_block_rv, attr::meta_schedule_layout_rewrite_postproc, const_true());
     }
   }
   return true;

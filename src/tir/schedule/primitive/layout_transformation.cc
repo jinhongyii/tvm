@@ -54,7 +54,12 @@ class TransformLayoutRewriter : private arith::IRMutatorWithAnalyzer {
 
   void RewriteBufferAccess(Buffer* buffer, Array<PrimExpr>* indices) {
     *buffer = new_buffer_;
-    *indices = index_map_->MapIndices(*indices, analyzer_);
+    Array<PrimExpr> mapped_indices = index_map_->MapIndices(*indices, analyzer_);
+    arith::Analyzer analyzer;
+    indices->clear();
+    for(const auto& idx: mapped_indices){
+      indices->push_back(analyzer.Simplify(idx));
+    }
   }
 
   using Parent = arith::IRMutatorWithAnalyzer;
