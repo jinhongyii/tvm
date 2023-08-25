@@ -34,7 +34,7 @@
 
 #include "../../op/distributed/distributed.h"
 #include "../../op/distributed/utils.h"
-
+#include "utils.h"
 namespace tvm {
 namespace relax {
 namespace distributed {
@@ -126,19 +126,6 @@ void CollectAxisGraphForDeviceMesh(const VarBindingNode* binding, const CallNode
     axis_group_graph->JoinAxis(Axis(tensor_list[i].get(), -1), {binding->var.get(), -1},
                                distributed::AxisGroupGraph::EdgeType::kDescend);
   }
-}
-/*!
- * \brief Pattern match op to a TIR function and look it up.
- * \return The TIR function, or nullopt if pattern match fails.
- */
-Optional<tir::PrimFunc> MatchPrimFunc(const IRModule& mod_, const Expr& op) {
-  const GlobalVar& global_var = Downcast<GlobalVar>(op);
-  // NOTE: as check works for nullptr(returns null)
-  Optional<BaseFunc> base_func = mod_->functions.Get(global_var);
-  if (auto* pfunc = base_func.as<tir::PrimFuncNode>()) {
-    return GetRef<tir::PrimFunc>(pfunc);
-  }
-  return NullOpt;
 }
 
 /*!

@@ -23,6 +23,7 @@
 #include <tvm/relax/distributed/struct_info.h>
 #include <tvm/relax/expr.h>
 #include <tvm/tir/function.h>
+#include <tvm/tir/stmt_functor.h>
 
 #include <algorithm>
 #include <limits>
@@ -31,6 +32,137 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+namespace tvm {
+namespace tir{
+using TIRVarAxis = std::pair<Var, int>;
+using BufferAxis = std::pair<Buffer, int>;
+class BufferAxisHash {
+  public:
+  size_t operator()(const BufferAxis& buffer_axis) const {
+    size_t const h1(ObjectPtrHash()(buffer_axis.first));
+    size_t const h2(std::hash<int>()(buffer_axis.second));
+    return h1 ^ (h2 << 1);
+  }
+};
+class BufferAxisGraphExtractor : public StmtExprVisitor {
+ public:
+
+  static std::vector<std::vector<TIRVarAxis>> GetTIRVarAxisGraph(const PrimFunc& prim_func) {
+    BufferAxisGraphExtractor extractor;
+    extractor(prim_func->body);
+    Map<Buffer, Var> inverse_buffer_map;
+    for (const auto& pr : prim_func->buffer_map) {
+      inverse_buffer_map.Set(pr.second, pr.first);
+    }
+    std::vector<std::vector<TIRVarAxis>> tir_var_axis_group_list;
+    std::unordered_set<BufferAxis, BufferAxisHash> visited;
+    for (const auto& pr : prim_func->buffer_map) {
+      Var param = pr.first;
+      Buffer buffer = pr.second;
+      for (int i = 0; i < static_cast<int>(buffer->shape.size()); i++) {
+        if (extractor.buffer_axis_graph_.count({buffer, i})) {
+          std::vector<BufferAxis> buffer_axis_group;
+          extractor.DFSGraph({buffer, i}, &visited, &buffer_axis_group);
+          if (buffer_axis_group.size() <= 1) {
+            continue;
+          }
+          std::vector<TIRVarAxis> tir_var_axis_group;
+          for (const auto& buffer_axis : buffer_axis_group) {
+            if (!inverse_buffer_map.count(buffer_axis.first)) {
+              continue;
+            }
+            tir_var_axis_group.push_back(
+                {inverse_buffer_map[buffer_axis.first], buffer_axis.second});
+          }
+          tir_var_axis_group_list.push_back(tir_var_axis_group);
+        }
+      }
+    }
+    return tir_var_axis_group_list;
+  }
+
+  void DFSGraph(BufferAxis cur, std::unordered_set<BufferAxis, BufferAxisHash>* visited,
+              std::vector<BufferAxis>* buffer_axis_group) {
+    if (visited->count(cur)) {
+      return;
+    }
+    visited->insert(cur);
+    buffer_axis_group->push_back(cur);
+    for (const auto& next : buffer_axis_graph_[cur]) {
+      DFSGraph(next, visited, buffer_axis_group);
+    }
+  }
+
+  
+
+ private:
+
+
+  void VisitStmt_(const BufferStoreNode* op) final {
+    StmtExprVisitor::VisitStmt_(op);
+    buffer_access_indices_.push_back({op->buffer, op->indices});
+  }
+
+  void VisitExpr_(const BufferLoadNode* op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    buffer_access_indices_.push_back({op->buffer, op->indices});
+  }
+
+  void VisitStmt_(const BlockNode* op) final {
+    if (op->name_hint == "root") {
+      StmtExprVisitor::VisitStmt_(op);
+      return;
+    }
+    buffer_access_indices_.clear();
+    StmtExprVisitor::VisitStmt_(op);
+    std::unordered_set<BufferAxis, BufferAxisHash> mapped_axis_set;
+    arith::Analyzer analyzer;
+    for (const auto& access_pr : buffer_access_indices_) {
+      Buffer buffer = access_pr.first;
+      Array<PrimExpr> indices = access_pr.second;
+      for (int i = 0; i < static_cast<int>(indices.size()); i++) {
+        if (mapped_axis_set.count({buffer, i})) {
+          continue;
+        }
+        mapped_axis_set.insert({buffer, i});
+        for (const auto& another_access_pr : buffer_access_indices_) {
+          if (another_access_pr.first.same_as(buffer)) {
+            continue;
+          }
+          Buffer another_buffer = another_access_pr.first;
+          Array<PrimExpr> another_indices = another_access_pr.second;
+          for (int j = 0; j < static_cast<int>(another_indices.size()); j++) {
+            if (mapped_axis_set.count({another_buffer, j})) {
+              continue;
+            }
+            if (analyzer.CanProveEqual(indices[i], another_indices[j])) {
+              mapped_axis_set.insert({another_buffer, j});
+              JoinBufferAxis({buffer, i}, {another_buffer, j});
+            }
+          }
+        }
+      }
+    }
+  }
+
+  void JoinBufferAxis(BufferAxis axis1, BufferAxis axis2) {
+    if (!buffer_axis_graph_.count(axis1)) {
+      buffer_axis_graph_[axis1] = {};
+    }
+    if (!buffer_axis_graph_.count(axis2)) {
+      buffer_axis_graph_[axis2] = {};
+    }
+    buffer_axis_graph_[axis1].push_back(axis2);
+    buffer_axis_graph_[axis2].push_back(axis1);
+  }
+
+  std::vector<std::pair<Buffer, Array<PrimExpr>>> buffer_access_indices_;
+  std::unordered_map<BufferAxis, std::vector<BufferAxis>, BufferAxisHash> buffer_axis_graph_;
+};
+} // namespace tir
+} // namespace tvm
+
 namespace tvm {
 namespace relax {
 namespace distributed {

@@ -48,6 +48,13 @@ using DataflowBlock = tvm::relax::DataflowBlock;
  */
 TVM_DLL Pass PropagateSharding();
 
+/*!
+ * \brief Lower global view TensorIR into local view.
+ *
+ * \return The Pass.
+ */
+TVM_DLL Pass LowerGlobalViewToLocalView();
+
 }  // namespace transform
 }  // namespace distributed
 }  // namespace relax
