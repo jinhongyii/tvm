@@ -44,6 +44,10 @@ using Device = DLDevice;
 
 namespace runtime {
 
+void ArrayCopyFromBytes(DLTensor* handle, const void* data, size_t nbytes);
+
+void ArrayCopyToBytes(const DLTensor* handle, void* data, size_t nbytes);
+
 /*!
  * \brief Managed NDArray.
  *  The array is backed by reference counted blocks.

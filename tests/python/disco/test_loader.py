@@ -23,7 +23,6 @@ import numpy as np
 
 from tvm import dlight as dl
 from tvm import relax as rx
-from tvm._ffi import register_func
 from tvm.contrib import tvmjs
 from tvm.runtime import ShapeTuple
 from tvm.runtime import disco as di
@@ -32,33 +31,26 @@ from tvm.script import relax as R
 from tvm.target import Target
 
 
-@register_func("tests.disco.shard_with_numpy", override=True)
-def _shard_with_numpy(src, num_shards, tgt):
-    s_0, s_1, s_2 = src.shape
-    tgt.copyfrom(src.numpy().reshape(s_0, num_shards, s_1 // num_shards, s_2).transpose(1, 0, 2, 3))
-
-
 def _create_loader(sess, path, param_dict, shard_info):
     path_ndarray_cache = path + "/ndarray-cache.json"
     tvmjs.dump_ndarray_cache(param_dict, path, encode_format="raw")
     with open(path_ndarray_cache, "r", encoding="utf-8") as i_f:
         ndarray_cache = i_f.read()
-    shard_with_numpy = sess.get_global_func("tests.disco.shard_with_numpy")
     loader_create = sess.get_global_func("runtime.disco.ShardLoader")
-    loader = loader_create(path_ndarray_cache, ndarray_cache, shard_info, shard_with_numpy)
+    loader = loader_create(path_ndarray_cache, ndarray_cache, shard_info, None)
     return loader
 
 
 def test_load_shard():
-    devices = [1, 2]
+    devices = [0, 1]
     param_dict = {
-        "x_0": np.random.uniform(size=[64, 128]).astype("float16"),
-        "x_1": np.random.uniform(size=[32, 128]).astype("float32"),
+        "param_0": np.random.uniform(size=[64, 128]).astype("float16"),
+        "param_1": np.random.uniform(size=[32, 128]).astype("float32"),
     }
     shard_info = json.dumps(
         {
-            "x_0": 1,
-            "x_1": 0,
+            "param_0": 1,
+            "param_1": 0,
         }
     )
     with tempfile.TemporaryDirectory() as path:
@@ -69,33 +61,70 @@ def test_load_shard():
         d_0 = loader_load(loader, ShapeTuple([0]))
         d_1 = loader_load(loader, ShapeTuple([1]))
         np.testing.assert_equal(
-            param_dict["x_0"][:, 0:64],
+            param_dict["param_0"][:, 0:64],
             d_0.debug_get_from_remote(0).numpy(),
         )
         np.testing.assert_equal(
-            param_dict["x_0"][:, 64:128],
+            param_dict["param_0"][:, 64:128],
             d_0.debug_get_from_remote(1).numpy(),
         )
         np.testing.assert_equal(
-            param_dict["x_1"][0:16, :],
+            param_dict["param_1"][0:16, :],
             d_1.debug_get_from_remote(0).numpy(),
         )
         np.testing.assert_equal(
-            param_dict["x_1"][16:32, :],
+            param_dict["param_1"][16:32, :],
             d_1.debug_get_from_remote(1).numpy(),
         )
 
-
-def test_load_shard_in_relax():
-    devices = [1, 2]
+def test_load_shard_all():
+    devices = [0, 1]
     param_dict = {
-        "x_0": np.random.uniform(size=[64, 128]).astype("float16"),
-        "x_1": np.random.uniform(size=[32, 128]).astype("float32"),
+        "param_0": np.random.uniform(size=[64, 128]).astype("float16"),
+        "param_1": np.random.uniform(size=[32, 128]).astype("float32"),
     }
     shard_info = json.dumps(
         {
-            "x_0": 1,
-            "x_1": 0,
+            "param_0": 1,
+            "param_1": 0,
+        }
+    )
+    with tempfile.TemporaryDirectory() as path:
+        sess = di.ThreadedSession(num_workers=len(devices))
+        sess.init_ccl("nccl", *devices)
+        loader = _create_loader(sess, path, param_dict, shard_info)
+        loader_load = sess.get_global_func("runtime.disco.ShardLoaderLoadAll")
+        tuple_getitem = sess.get_global_func("vm.builtin.tuple_getitem")
+        d = loader_load(loader)
+        d_0 = tuple_getitem(d, 0)
+        d_1 = tuple_getitem(d, 1)
+        np.testing.assert_equal(
+            param_dict["param_0"][:, 0:64],
+            d_0.debug_get_from_remote(0).numpy(),
+        )
+        np.testing.assert_equal(
+            param_dict["param_0"][:, 64:128],
+            d_0.debug_get_from_remote(1).numpy(),
+        )
+        np.testing.assert_equal(
+            param_dict["param_1"][0:16, :],
+            d_1.debug_get_from_remote(0).numpy(),
+        )
+        np.testing.assert_equal(
+            param_dict["param_1"][16:32, :],
+            d_1.debug_get_from_remote(1).numpy(),
+        )
+
+def test_load_shard_in_relax():
+    devices = [0, 1]
+    param_dict = {
+        "param_0": np.random.uniform(size=[64, 128]).astype("float16"),
+        "param_1": np.random.uniform(size=[32, 128]).astype("float32"),
+    }
+    shard_info = json.dumps(
+        {
+            "param_0": 1,
+            "param_1": 0,
         }
     )
 
@@ -156,23 +185,60 @@ def test_load_shard_in_relax():
         loader = _create_loader(sess, tmpdir, param_dict, shard_info)
         result = mod["main"](loader)
         np.testing.assert_equal(
-            param_dict["x_0"][:, 0:64],
+            param_dict["param_0"][:, 0:64],
             result.debug_get_from_remote(0)[0].numpy(),
         )
         np.testing.assert_equal(
-            param_dict["x_0"][:, 64:128],
+            param_dict["param_0"][:, 64:128],
             result.debug_get_from_remote(1)[0].numpy(),
         )
         np.testing.assert_equal(
-            param_dict["x_1"][0:16, :],
+            param_dict["param_1"][0:16, :],
             result.debug_get_from_remote(0)[1].numpy(),
         )
         np.testing.assert_equal(
-            param_dict["x_1"][16:32, :],
+            param_dict["param_1"][16:32, :],
             result.debug_get_from_remote(1)[1].numpy(),
+        )
+        
+def test_load_shard_broadcast():
+    devices = [0, 1]
+    param_dict = {
+        "param_0": np.random.uniform(size=[64, 128]).astype("float16"),
+        "param_1": np.random.uniform(size=[32, 128]).astype("float32"),
+    }
+    shard_info = json.dumps(
+        {}
+    )
+    with tempfile.TemporaryDirectory() as path:
+        sess = di.ThreadedSession(num_workers=len(devices))
+        sess.init_ccl("nccl", *devices)
+        loader = _create_loader(sess, path, param_dict, shard_info)
+        loader_load = sess.get_global_func("runtime.disco.ShardLoaderLoadAll")
+        tuple_getitem = sess.get_global_func("vm.builtin.tuple_getitem")
+        d = loader_load(loader)
+        d_0 = tuple_getitem(d, 0)
+        d_1 = tuple_getitem(d, 1)
+        np.testing.assert_equal(
+            param_dict["param_0"],
+            d_0.debug_get_from_remote(0).numpy(),
+        )
+        np.testing.assert_equal(
+            param_dict["param_0"],
+            d_0.debug_get_from_remote(1).numpy(),
+        )
+        np.testing.assert_equal(
+            param_dict["param_1"],
+            d_1.debug_get_from_remote(0).numpy(),
+        )
+        np.testing.assert_equal(
+            param_dict["param_1"],
+            d_1.debug_get_from_remote(1).numpy(),
         )
 
 
 if __name__ == "__main__":
     test_load_shard()
+    test_load_shard_all()
     test_load_shard_in_relax()
+    test_load_shard_broadcast()
