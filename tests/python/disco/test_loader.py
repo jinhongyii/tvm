@@ -58,8 +58,8 @@ def test_load_shard():
         sess.init_ccl("nccl", *devices)
         loader = _create_loader(sess, path, param_dict, shard_info)
         loader_load = sess.get_global_func("runtime.disco.ShardLoaderLoad")
-        d_0 = loader_load(loader, ShapeTuple([0]))
-        d_1 = loader_load(loader, ShapeTuple([1]))
+        d_0 = loader_load(loader, "param_0")
+        d_1 = loader_load(loader, "param_1")
         np.testing.assert_equal(
             param_dict["param_0"][:, 0:64],
             d_0.debug_get_from_remote(0).numpy(),
@@ -140,13 +140,13 @@ def test_load_shard_in_relax():
                 lv0: R.Tensor((64, 64), "float32") = R.call_pure_packed(
                     "runtime.disco.ShardLoaderLoad",
                     loader,
-                    R.shape([0]),
+                    "param_0",
                     sinfo_args=R.Tensor((64, 64), "float32"),
                 )
                 lv1: R.Tensor((16, 128), "float32") = R.call_pure_packed(
                     "runtime.disco.ShardLoaderLoad",
                     loader,
-                    R.shape([1]),
+                    "param_1",
                     sinfo_args=R.Tensor((16, 128), "float32"),
                 )
                 lv2 = R.tuple(lv0, lv1)
