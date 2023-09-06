@@ -164,7 +164,6 @@ NDArray ShardLoaderObj::Load(std::string weight_name) const {
 }
 
 NDArray ShardLoaderObj::Shard(NDArray source, int dim, int num_slices) const {
-  LOG(INFO) << dim << " " << source->ndim;
   ICHECK(dim >= 0 && dim < source->ndim);
   // Assemble a flattened 3d src tensor
   int64_t src_flat[3] = {1, 1, 1};
