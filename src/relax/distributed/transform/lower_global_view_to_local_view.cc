@@ -24,6 +24,7 @@
 #include <tvm/relax/distributed/axis_group_graph.h>
 #include <tvm/relax/distributed/transform.h>
 #include <tvm/relax/expr_functor.h>
+#include <tvm/relax/attrs/ccl.h>
 #include <tvm/tir/stmt_functor.h>
 #include "../../../tir/schedule/transform.h"
 #include "utils.h"
@@ -76,11 +77,77 @@ class DistBufferReplacer : public StmtExprMutator {
   Map<Buffer, Buffer> buffer_map_;
 };
 
+class BlockInfoCollector: public StmtExprVisitor{
+
+  private:
+  void VisitStmt_(const BufferStoreNode* op) final {
+    buffer_access_indices[op->buffer].push_back(op->indices);
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const BufferLoadNode* op) final {
+    buffer_access_indices[op->buffer].push_back(op->indices);
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const BlockNode* op) final{
+    for(const auto& iter_var: op->iter_vars){
+      if(iter_var->iter_type == kCommReduce){
+        ICHECK(op->writes.size() == 1);
+        reduce_buffer_ = op->writes[0]->buffer;
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  bool IsReduceBufferAccess(const PrimExpr& expr){
+    if(const auto* buffer_load = expr.as<BufferLoadNode>()){
+      return buffer_load->buffer.same_as(reduce_buffer_);
+    }
+    return false;
+  }
+
+  void VisitExpr_(const AddNode* op) final{
+    if(IsReduceBufferAccess(op->a) || IsReduceBufferAccess(op->b)){
+      reduce_kind = "sum";
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const MulNode* op) final{
+    if(IsReduceBufferAccess(op->a) || IsReduceBufferAccess(op->b)){
+      reduce_kind = "prod";
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const MinNode* op) final{
+    if(IsReduceBufferAccess(op->a) || IsReduceBufferAccess(op->b)){
+      reduce_kind = "min";
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const MaxNode* op) final{
+    if(IsReduceBufferAccess(op->a) || IsReduceBufferAccess(op->b)){
+      reduce_kind = "max";
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  Buffer reduce_buffer_;
+
+public:
+  std::unordered_map<Buffer, Array<Array<PrimExpr>>, ObjectPtrHash, ObjectPtrEqual> buffer_access_indices;
+  std::string reduce_kind;
+};
+
 class DistributedBufferCompactor: StmtExprMutator {
   // FIXME: change to use unordered_map<int, AxisShardingSpec> (represent dim and sharding spec)
+  // Currently we assume device mesh is only 1d, but when we support 2d, we need to change this
   using DimShard = std::unordered_map<int, int>;
   public:
-  static PrimFunc DistBufferCompact(const std::vector<ShardingSpec>& sharding_specs, PrimFunc prim_func){
+  static std::tuple<PrimFunc, std::string> DistBufferCompact(const std::vector<ShardingSpec>& sharding_specs, PrimFunc prim_func){
     DistributedBufferCompactor compactor(sharding_specs, prim_func);
     Map<Var, Buffer> new_func_buffer_map;
     Map<Buffer, Buffer> replace_buffer_map;
@@ -96,7 +163,7 @@ class DistributedBufferCompactor: StmtExprMutator {
     ObjectPtr<PrimFuncNode> new_func = make_object<PrimFuncNode>(*prim_func.get());
     new_func->buffer_map = new_func_buffer_map;
     new_func->body = new_body;
-    return PrimFunc(new_func);
+    return std::make_tuple(PrimFunc(new_func), compactor.add_allreduce_kind_);
   }
 
   private:
@@ -132,17 +199,7 @@ class DistributedBufferCompactor: StmtExprMutator {
     }
   }
 
-  Stmt VisitStmt_(const BufferStoreNode* op) final {
-    buffer_access_indices_[op->buffer].push_back(op->indices);
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  PrimExpr VisitExpr_(const BufferLoadNode* op) final {
-    buffer_access_indices_[op->buffer].push_back(op->indices);
-    return StmtExprMutator::VisitExpr_(op);
-  }
-
-  Array<IterVar> ShardIterVar(Block block){
+  Array<IterVar> ShardIterVar(Block block, const std::unordered_map<Buffer, Array<Array<PrimExpr>>, ObjectPtrHash, ObjectPtrEqual>& buffer_access_indices){
     std::vector<Buffer> buffers;
     for(const auto& read: block->reads){
       buffers.push_back(read->buffer);
@@ -151,10 +208,10 @@ class DistributedBufferCompactor: StmtExprMutator {
       buffers.push_back(write->buffer);
     }
     for(const auto& buffer: buffers){
-      Array<Array<PrimExpr>> access_indices = buffer_access_indices_[buffer];
-      if (buffer_shards_.count(buffer) == 0){
+      if(buffer_access_indices.count(buffer) == 0 || buffer_shards_.count(buffer) == 0){
         continue;
       }
+      Array<Array<PrimExpr>> access_indices = buffer_access_indices.at(buffer);
       DimShard dim_shards = buffer_shards_[buffer];
       for(const auto& access_index: access_indices){
         for (const auto& pr: dim_shards){
@@ -208,9 +265,10 @@ class DistributedBufferCompactor: StmtExprMutator {
   }
 
   Stmt VisitStmt_(const BlockNode* op) final{
-    buffer_access_indices_.clear();
     Block block = Downcast<Block>(StmtExprMutator::VisitStmt_(op));
-    Array<IterVar> new_iter_vars = ShardIterVar(block);
+    BlockInfoCollector collector;
+    collector(block);
+    Array<IterVar> new_iter_vars = ShardIterVar(block, collector.buffer_access_indices);
     Array<Buffer> new_alloc_buffers;
     Map<Buffer, Buffer> buffer_map;
     for(const Buffer& buffer: block->alloc_buffers){
@@ -219,6 +277,15 @@ class DistributedBufferCompactor: StmtExprMutator {
         buffer_map.Set(buffer, sharded_buffer);
       }
       new_alloc_buffers.push_back(sharded_buffer);
+    }
+    // condition for adding allreduce:
+    // sharding on reduction axis 
+    for(const IterVar& iter_var: new_iter_vars){
+      if(iter_var->iter_type ==kCommReduce && iter_var_shards_.count(iter_var->var)){
+        ICHECK(add_allreduce_kind_ == "");
+        AddAllReduceBlock(collector.reduce_kind);
+        break;
+      }
     }
     ObjectPtr<BlockNode> new_block = make_object<BlockNode>(*block.operator->());
     new_block->iter_vars = new_iter_vars;
@@ -230,12 +297,7 @@ class DistributedBufferCompactor: StmtExprMutator {
     return Block(new_block);
   }
 
-  Stmt ConstructAllReduceBlock(Buffer old_buffer, Buffer new_buffer){
-    //FIXME: add implementation after TIR allreduce is supported
-    Stmt body = Evaluate(0);
-    body = Block({}, {}, {}, "all_reduce", body);
-    return body;
-  }
+  void AddAllReduceBlock(std::string reduce_kind) { add_allreduce_kind_ = reduce_kind; }
 
   Stmt VisitStmt_(const BlockRealizeNode* op) final{
     BlockRealize realize = Downcast<BlockRealize>(StmtExprMutator::VisitStmt_(op));
@@ -248,14 +310,6 @@ class DistributedBufferCompactor: StmtExprMutator {
       }
       ICHECK(iter_value.as<VarNode>());
       loop_var_shards_[Downcast<Var>(iter_value)] = iter_var_shards_[iter_var->var];
-      if (iter_var->iter_type != kCommReduce) {
-        continue;
-      }
-      ICHECK(realize->block->writes.size() == 1);
-      Buffer buffer = realize->block->writes[0]->buffer;
-      Buffer new_buffer = Buffer(make_object<BufferNode>(*buffer.get()));
-      realize = Downcast<BlockRealize>(DistBufferReplacer::BufferReplace(realize, {{buffer, new_buffer}}));
-      insert_after_.push_back(ConstructAllReduceBlock(buffer, new_buffer));
     }
     return realize;
   }
@@ -274,38 +328,14 @@ class DistributedBufferCompactor: StmtExprMutator {
   }
 
 
-  // FIXME: add implementation after TIR allreduce is supported
-  Stmt VisitStmt_(const SeqStmtNode* op) final {
-    std::vector<Stmt> new_stmts;
-    for (int i = 0; i < op->seq.size(); i++) {
-      Stmt stmt = op->seq[i];
-      insert_before_.clear();
-      insert_after_.clear();
-      Stmt new_stmt = StmtExprMutator::VisitStmt(stmt);
-      ICHECK(insert_before_.empty());
-      ICHECK(insert_after_.empty() || i == op->seq.size() - 1);
-      // for(const Stmt& stmt: insert_before_){
-      //   new_stmts.push_back(stmt);
-      // }
-      if (new_stmt.defined()) {
-        new_stmts.push_back(new_stmt);
-      }
-      // for(const Stmt& stmt: insert_after_){
-      //   new_stmts.push_back(stmt);
-      // }
-    }
-    return SeqStmt(new_stmts);
-  }
 
-  std::unordered_map<Buffer, Array<Array<PrimExpr>>, ObjectPtrHash, ObjectPtrEqual> buffer_access_indices_;
   std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> iter_var_shards_;
   std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> loop_var_shards_;
-  Array<Stmt> insert_before_;
-  Array<Stmt> insert_after_;
   Array<Buffer> allocated_buffer_under_root;
   BufferAxisGraphExtractor extractor_;
   std::vector<ShardingSpec> sharding_specs_;
   std::unordered_map<Buffer, DimShard, ObjectPtrHash, ObjectPtrEqual> buffer_shards_;
+  std::string add_allreduce_kind_;
 };
 
 } // namespace tir
@@ -356,13 +386,21 @@ private:
     sharding_specs.push_back(ShardingSpec(sinfo->device_mesh, sinfo->placement));
     GlobalVar gvar = Downcast<GlobalVar>(val->args[0]);
     tir::PrimFunc prim_func = MatchPrimFunc(builder_->GetContextIRModule(), gvar).value();
-    tir::PrimFunc new_prim_func = tir::DistributedBufferCompactor::DistBufferCompact(sharding_specs, prim_func);
+    tir::PrimFunc new_prim_func;
+    std::string allreduce_kind;
+    std::tie(new_prim_func, allreduce_kind) = tir::DistributedBufferCompactor::DistBufferCompact(sharding_specs, prim_func);
     auto new_gvar = builder_->AddFunction(new_prim_func, gvar->name_hint);
     Call call = Downcast<Call>(this->VisitExpr(binding->value));
-    ObjectPtr<CallNode> new_call = make_object<CallNode>(*call.get());
-    new_call->op = Op::Get("relax.dist.call_tir_local_view");
-    new_call->args.Set(0, new_gvar);
-    ReEmitBinding(binding, Call(new_call));
+    ObjectPtr<CallNode> new_call_node = make_object<CallNode>(*call.get());
+    new_call_node->op = Op::Get("relax.dist.call_tir_local_view");
+    new_call_node->args.Set(0, new_gvar);
+    Call new_call(new_call_node);
+    if (allreduce_kind != "") {
+      ObjectPtr<AllReduceAttrs> attrs = make_object<AllReduceAttrs>();
+      attrs->op_type = allreduce_kind;
+      new_call = Call(Op::Get("relax.ccl.allreduce"), {new_call}, Attrs(attrs), {});
+    }
+    ReEmitBinding(binding, this->builder_->Normalize(new_call));
   }
 };
 
