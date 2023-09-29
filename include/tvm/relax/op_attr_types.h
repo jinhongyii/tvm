@@ -70,6 +70,8 @@ using FLegalize = runtime::TypedPackedFunc<Expr(const BlockBuilder& bb, const Ca
 using FPrimalGradient = runtime::TypedPackedFunc<tvm::Array<Expr>(
     const Var& orig_var, const Call& orig_call, const Var& output_grad, const BlockBuilder& ctx)>;
 
+using FLowerShard = runtime::TypedPackedFunc<Expr(const Call& call, const BlockBuilder& ctx)>;
+
 }  // namespace relax
 }  // namespace tvm
 #endif  // TVM_RELAX_OP_ATTR_TYPES_H_
