@@ -30,6 +30,7 @@
 #include <tvm/relax/attrs/ccl.h>
 #include <tvm/tir/stmt_functor.h>
 #include "../../../tir/schedule/transform.h"
+#include "../../op/ccl/ccl.h"
 #include "utils.h"
 
 namespace tvm{
@@ -82,7 +83,7 @@ private:
     return TensorStructInfo(new_tensor_sinfo);
   }
 
-  Expr ShardInputTensorAndConstant(Expr input){
+  Expr ShardInputParamTensorAndConstant(Expr input){
     const auto* sinfo = GetStructInfoAs<DTensorStructInfoNode>(input);
     if(!sinfo){
       return input;
@@ -103,25 +104,73 @@ private:
     }
   }
 
+  void InputPreprocessing(Function func) {
+    Optional<Integer> num_inputs = func->GetAttr<Integer>("num_input");
+    if(!num_inputs.defined()){
+      return;
+    }
+    for (int i = 0; i < num_inputs.value()->value; i++) {
+      auto sinfo = GetStructInfoAs<DTensorStructInfoNode>(func->params[i]);
+      for(const auto& dim_spec: sinfo->placement->dim_specs){
+        ICHECK(dim_spec->kind == PlacementSpecKind::kReplica)
+            << "Input tensor sharding is not supported now";
+      }
+      Var old_input = param_tensor_remap_.at(func->params[i]);
+      input_preprocessing_.Set(broadcast_from_worker0(old_input), func->params[i]);
+    }
+  }
+
   Function RewriteFunction(Function func){
+    input_tensor_remap_.clear();
+    param_tensor_remap_.clear();
+    input_preprocessing_.clear();
     Array<Var> new_params;
     for (const Var& var : func->params) {
       if (GetStructInfoAs<DTensorStructInfoNode>(var)) {
-        Var new_param = Downcast<Var>(ShardInputTensorAndConstant(var));
-        input_tensor_remap_.Set(var, new_param);
+        Var new_param = Downcast<Var>(ShardInputParamTensorAndConstant(var));
+        param_tensor_remap_.Set(var, new_param);
         new_params.push_back(new_param);
       } else {
         new_params.push_back(var);
       }
     }
+    InputPreprocessing(func);
     auto new_body = VisitWithNewScope(func->body, new_params);
     Function new_func(new_params, new_body, NullOpt, func->is_pure, func->attrs);
     return new_func;
   }
 
+  BindingBlock VisitBindingBlock_(const BindingBlockNode* block) {
+    builder_->BeginBindingBlock();
+    for(const auto& pr: input_preprocessing_){
+      Var new_var = builder_->Emit(pr.first, "broadcast");
+      input_tensor_remap_.Set(pr.second, new_var);
+    }
+    for (Binding binding : block->bindings) {
+      this->VisitBinding(binding);
+    }
+    return builder_->EndBlock();
+  }
+
+  BindingBlock VisitBindingBlock_(const DataflowBlockNode* block) {
+    builder_->BeginDataflowBlock();
+    for(const auto& pr: input_preprocessing_){
+      Var new_var = builder_->Emit(pr.first, "broadcast");
+      input_tensor_remap_.Set(pr.second, new_var);
+    }
+    for (auto binding : block->bindings) {
+      this->VisitBinding(binding);
+    }
+    return builder_->EndBlock();
+  }
+
   Expr VisitExpr_(const VarNode* var) final {
     auto it = input_tensor_remap_.find(GetRef<Var>(var));
     if (it != input_tensor_remap_.end()) {
+      return (*it).second;
+    }
+    it = param_tensor_remap_.find(GetRef<Var>(var));
+    if (it != param_tensor_remap_.end()) {
       return (*it).second;
     }
     return ExprMutator::VisitExpr_(var);
@@ -158,6 +207,8 @@ private:
     ReEmitBinding(binding, builder_->Normalize(new_call));
   }
 
+  Map<Var, Var> param_tensor_remap_;
+  Map<Expr, Var> input_preprocessing_;
   Map<Var, Var> input_tensor_remap_;
 };
 

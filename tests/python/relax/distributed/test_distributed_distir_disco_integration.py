@@ -74,7 +74,7 @@ def test_mlp(session_kind, ccl):  # pylint: disable=too-many-locals
             W1: R.Tensor((128, 128), "float32"),
             W2: R.Tensor((128, 128), "float32"),
         ) -> R.Tensor((128, 128), "float32"):
-            R.func_attr({"global_symbol": "main"})
+            R.func_attr({"global_symbol": "main", "num_input": 1})
             with R.dataflow():
                 lv0: R.Tensor((128, 128), "float32") = R.matmul(x, W1)
                 lv1: R.Tensor((128, 128), "float32") = R.dist.annotate_sharding(lv0, "mesh[0]", "S[1]")
@@ -111,9 +111,11 @@ def test_mlp(session_kind, ccl):  # pylint: disable=too-many-locals
     with tempfile.TemporaryDirectory() as tmpdir:
         path = tmpdir + "/test.so"
         sharded_mod = AnnotatedMLP
+        sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
         sharded_mod = relax.distributed.transform.PropagateSharding()(sharded_mod)
         sharded_mod = relax.distributed.transform.LowerGlobalViewToLocalView()(sharded_mod)
         sharded_mod = relax.distributed.transform.LowerDistIR()(sharded_mod)
+        print(sharded_mod)
         relax_build(sharded_mod, target).export_library(path)
 
         mod = sess.load_vm_module(path)

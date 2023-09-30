@@ -83,6 +83,7 @@ class MLP:
 
     @R.function
     def foo(x: R.DTensor((128, 128), "float32", "mesh[0]", "R"), weight1: R.DTensor((128, 128), "float32", "mesh[0]", "S[1]"), weight2: R.DTensor((128, 128), "float32", "mesh[0]", "S[0]")) -> R.DTensor((128, 128), "float32", "mesh[0]", "R"):
+        R.func_attr({"num_input": 1})
         cls = MLP
         lv0 = R.dist.call_tir(cls.matmul, (x, weight1), out_sinfo=R.DTensor((128, 128), "float32", "mesh[0]", "S[1]"))
         lv1 = R.dist.call_tir(cls.gelu, (lv0,), out_sinfo=R.DTensor((128, 128), "float32", "mesh[0]", "S[1]"))

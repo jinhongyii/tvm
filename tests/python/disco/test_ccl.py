@@ -400,4 +400,4 @@ def test_attention(session_kind, ccl):  # pylint: disable=too-many-locals,too-ma
 
 
 if __name__ == "__main__":
-    test_attention(di.ProcessSession, "rccl")
+    tvm.testing.main()

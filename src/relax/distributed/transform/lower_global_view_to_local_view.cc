@@ -77,7 +77,7 @@ class DistBufferReplacer : public StmtExprMutator {
   Map<Buffer, Buffer> buffer_map_;
 };
 
-class BlockInfoCollector: public StmtExprVisitor{
+class DistBlockInfoCollector: public StmtExprVisitor{
 
   private:
   void VisitStmt_(const BufferStoreNode* op) final {
@@ -266,7 +266,7 @@ class DistributedBufferCompactor: StmtExprMutator {
 
   Stmt VisitStmt_(const BlockNode* op) final{
     Block block = Downcast<Block>(StmtExprMutator::VisitStmt_(op));
-    BlockInfoCollector collector;
+    DistBlockInfoCollector collector;
     collector(block);
     Array<IterVar> new_iter_vars = ShardIterVar(block, collector.buffer_access_indices);
     Array<Buffer> new_alloc_buffers;
