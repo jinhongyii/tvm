@@ -24,6 +24,7 @@
 #include <tvm/relax/expr.h>
 #include <tvm/tir/function.h>
 #include <tvm/tir/stmt_functor.h>
+#include <tvm/arith/iter_affine_map.h>
 
 #include <algorithm>
 #include <limits>
@@ -109,6 +110,47 @@ class BufferAxisGraphExtractor : public StmtExprVisitor {
     buffer_access_indices_.push_back({op->buffer, op->indices});
   }
 
+  bool Match(PrimExpr a, PrimExpr buffer_shape_a, PrimExpr b, PrimExpr buffer_shape_b, arith::Analyzer* analyzer){
+    if(b.as<VarNode>()){
+      std::swap(a, b);
+      std::swap(buffer_shape_a, buffer_shape_b);
+    }
+    if(!a.as<VarNode>()){
+      return false;
+    }
+    Var var = Downcast<Var>(a);
+    // index var `a` must access whole range of a specific buffer dimension
+    if(!analyzer->CanProveEqual(buffer_shape_a, iter_var_range_[var]->extent)){
+      LOG(INFO) << "fail because shape mismatch";
+      return false;
+    }
+    arith::IterSumExpr iter_sum = arith::NormalizeToIterSum(b, iter_var_range_, analyzer);
+    // base must be zero
+    if(!is_zero(iter_sum->base)){
+      LOG(INFO) << "fail because base zero";
+      return false;
+    }
+    if(iter_sum->args.empty()){
+      LOG(INFO)<<"fail because args empty";
+      return false;
+    }
+    // floormod(floordiv(source, lower_factor), extent) * scale
+    arith::IterSplitExpr highest_iter_split = iter_sum->args[0];
+    const auto* source_var = highest_iter_split->source->source.as<VarNode>();
+    //source must be `a`
+    if(!source_var || source_var != var.get()){
+      LOG(INFO) << highest_iter_split->source <<" vs "<< var;
+      LOG(INFO) << "fail because source not `a`";
+      return false;
+    }
+    //extent must be 1
+    if(!is_one(highest_iter_split->extent)){
+      LOG(INFO) << "fail because extent not 1";
+      return false;
+    }
+    return true;
+  }
+
   void VisitStmt_(const BlockNode* op) final {
     if (op->name_hint == "root") {
       StmtExprVisitor::VisitStmt_(op);
@@ -116,16 +158,15 @@ class BufferAxisGraphExtractor : public StmtExprVisitor {
     }
     buffer_access_indices_.clear();
     StmtExprVisitor::VisitStmt_(op);
-    std::unordered_set<BufferAxis, BufferAxisHash> mapped_axis_set;
+    iter_var_range_.clear();
+    for (const auto& iter_var : op->iter_vars) {
+      iter_var_range_.Set(iter_var->var, iter_var->dom);
+    }
     arith::Analyzer analyzer;
     for (const auto& access_pr : buffer_access_indices_) {
       Buffer buffer = access_pr.first;
       Array<PrimExpr> indices = access_pr.second;
       for (int i = 0; i < static_cast<int>(indices.size()); i++) {
-        if (mapped_axis_set.count({buffer, i})) {
-          continue;
-        }
-        mapped_axis_set.insert({buffer, i});
         for (const auto& another_access_pr : buffer_access_indices_) {
           if (another_access_pr.first.same_as(buffer)) {
             continue;
@@ -133,11 +174,9 @@ class BufferAxisGraphExtractor : public StmtExprVisitor {
           Buffer another_buffer = another_access_pr.first;
           Array<PrimExpr> another_indices = another_access_pr.second;
           for (int j = 0; j < static_cast<int>(another_indices.size()); j++) {
-            if (mapped_axis_set.count({another_buffer, j})) {
-              continue;
-            }
-            if (analyzer.CanProveEqual(indices[i], another_indices[j]) && analyzer.CanProveEqual(buffer->shape[i], another_buffer->shape[j])) {
-              mapped_axis_set.insert({another_buffer, j});
+            LOG(INFO)<< "Match: " << indices[i] << " " << buffer->shape[i] << " " << another_indices[j] << " " << another_buffer->shape[j];
+            LOG(INFO)<< "result:"<< Match(indices[i], buffer->shape[i], another_indices[j], another_buffer->shape[j], &analyzer);
+            if (Match(indices[i], buffer->shape[i], another_indices[j], another_buffer->shape[j], &analyzer)) {
               JoinBufferAxis({buffer, i}, {another_buffer, j});
             }
           }
@@ -159,6 +198,7 @@ class BufferAxisGraphExtractor : public StmtExprVisitor {
 
   std::vector<std::pair<Buffer, Array<PrimExpr>>> buffer_access_indices_;
   std::unordered_map<BufferAxis, std::vector<BufferAxis>, BufferAxisHash> buffer_axis_graph_;
+  Map<Var, Range> iter_var_range_;
 };
 } // namespace tir
 } // namespace tvm

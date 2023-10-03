@@ -150,6 +150,7 @@ class DistributedBufferCompactor: StmtExprMutator {
   static std::tuple<PrimFunc, std::string> DistBufferCompact(const std::vector<ShardingSpec>& sharding_specs, PrimFunc prim_func){
 
     prim_func = RenewDefs(prim_func);
+    LOG(INFO) << prim_func;
     DistributedBufferCompactor compactor(sharding_specs, prim_func);
     Map<Var, Buffer> new_func_buffer_map;
     Map<Buffer, Buffer> replace_buffer_map;
@@ -219,6 +220,7 @@ class DistributedBufferCompactor: StmtExprMutator {
         for (const auto& pr: dim_shards){
           int dim = pr.first;
           int shard = pr.second;
+          LOG(INFO) << buffer<<" dimension "<<dim << ", shard:" << shard;
           Var var = Downcast<Var>(access_index[dim]);
           ICHECK(!iter_var_shards_.count(var) || iter_var_shards_[var] == shard)
               << "A loop cannot have different sharding";
