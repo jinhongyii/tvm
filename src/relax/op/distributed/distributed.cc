@@ -106,10 +106,10 @@ RELAY_REGISTER_OP("relax.dist.call_tir_local_view")
     .set_attr<FInferStructInfo>("FInferStructInfo", InferStructInfoCallTIRLocalView)
     .set_attr<Bool>("FPurity", Bool(true));
 
-Expr MakeCallTIRLocalView(Expr func, Tuple args, Array<TensorStructInfo> out_sinfo_list,
+Expr MakeCallTIRLocalView(Expr func, Tuple args, Array<distributed::DTensorStructInfo> out_sinfo_list,
                  Optional<Expr> packed_ints) {
-  for (const TensorStructInfo& sinfo : out_sinfo_list) {
-    const auto* shape = sinfo->shape.as<ShapeExprNode>();
+  for (const distributed::DTensorStructInfo& sinfo : out_sinfo_list) {
+    const auto* shape = sinfo->tensor_sinfo->shape.as<ShapeExprNode>();
     CHECK(shape != nullptr) << "out_sinfo of call_tir_local_view should have defined ShapeExpr as shape. "
                                "However, one given structure info is "
                             << sinfo;

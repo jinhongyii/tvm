@@ -148,13 +148,15 @@ class DistributedBufferCompactor: StmtExprMutator {
   using DimShard = std::unordered_map<int, int>;
   public:
   static std::tuple<PrimFunc, std::string> DistBufferCompact(const std::vector<ShardingSpec>& sharding_specs, PrimFunc prim_func){
+
+    prim_func = RenewDefs(prim_func);
     DistributedBufferCompactor compactor(sharding_specs, prim_func);
     Map<Var, Buffer> new_func_buffer_map;
     Map<Buffer, Buffer> replace_buffer_map;
     for (const auto& pr : prim_func->buffer_map) {
       Buffer shard_buffer = compactor.ShardBuffer(pr.second);
       new_func_buffer_map.Set(pr.first, shard_buffer);
-      if(!shard_buffer.same_as(pr.second)){
+      if (!shard_buffer.same_as(pr.second)) {
         replace_buffer_map.Set(pr.second, shard_buffer);
       }
     }
@@ -177,13 +179,13 @@ class DistributedBufferCompactor: StmtExprMutator {
   void PropagateShardingSpecOnBlock(PrimFunc prim_func){
     extractor_(prim_func->body);
     std::unordered_set<BufferAxis, BufferAxisHash> visited;
-    for (int i = 0; i < prim_func->params.size(); i++){
+    for (int i = 0, j = 0; i < prim_func->params.size(); i++){
       Var param_var = prim_func->params[i];
       if(!prim_func->buffer_map.count(param_var)){
         continue;
       }
       Buffer param_buffer = prim_func->buffer_map[param_var];
-      ShardingSpec spec = sharding_specs_[i];
+      ShardingSpec spec = sharding_specs_[j++];
 
       for (int mesh_dim = 0; mesh_dim < static_cast<int>(spec.first->shape.size()); mesh_dim++){
         PlacementSpec dim_placement = spec.second->dim_specs[mesh_dim];
@@ -367,6 +369,20 @@ public:
   }
 
 private:
+  inline Array<DTensorStructInfo> ExtractDTensorStructInfo(Var var){
+    if(const auto* dtensor_sinfo = GetStructInfoAs<DTensorStructInfoNode>(var)){
+      return {GetRef<DTensorStructInfo>(dtensor_sinfo)};
+    } else if (const auto* tuple_sinfo = GetStructInfoAs<TupleStructInfoNode>(var)){
+      Array<DTensorStructInfo> ret;
+      for(const auto& field: tuple_sinfo->fields){
+        ret.push_back(Downcast<DTensorStructInfo>(field));
+      }
+      return ret;
+    } else {
+      LOG(FATAL) << "The output of a call_tir should be a DTensorStructInfo or TupleStructInfo";
+    }
+  }
+
   void VisitBinding_(const VarBindingNode* binding, const CallNode* val) final{
     static const Op& call_tir_op = Op::Get("relax.call_tir");
     if(!val->op.same_as(call_tir_op)){
@@ -381,9 +397,10 @@ private:
       sharding_specs.push_back(ShardingSpec(sinfo->device_mesh, sinfo->placement));
     }
     Var output_var = binding->var;
-    const auto* sinfo = GetStructInfoAs<DTensorStructInfoNode>(output_var);
-    ICHECK(sinfo);
-    sharding_specs.push_back(ShardingSpec(sinfo->device_mesh, sinfo->placement));
+    Array<DTensorStructInfo> output_sinfos = ExtractDTensorStructInfo(output_var);
+    for(const auto& sinfo: output_sinfos){
+      sharding_specs.push_back(ShardingSpec(sinfo->device_mesh, sinfo->placement));
+    }
     GlobalVar gvar = Downcast<GlobalVar>(val->args[0]);
     tir::PrimFunc prim_func = MatchPrimFunc(builder_->GetContextIRModule(), gvar).value();
     tir::PrimFunc new_prim_func;

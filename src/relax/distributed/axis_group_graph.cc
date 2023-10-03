@@ -307,40 +307,54 @@ void BuildAxisGraphReshape(const Var& output_var, const Call& call,
   }
 }
 
+inline int GetNumOutput(Call call) { 
+  StructInfo sinfo = call->sinfo_args[0]; 
+  if(const auto* tuple_sinfo = sinfo.as<TupleStructInfoNode>()){
+    return tuple_sinfo->fields.size();
+  } else {
+    return 1;
+  }
+}
+
 void BuildAxisGraphCallTIR(const Var& output_var, const Call& call, const tir::PrimFunc& func,
                            distributed::AxisGroupGraph* axis_group_graph) {
   auto tir_var_axis_group_list = tir::BufferAxisGraphExtractor::GetTIRVarAxisGraph(func);
-  Map<tir::Var, Expr> tir_var_to_relax_expr;
-  Array<Expr> tensor_list = Downcast<Tuple>(call->args[1])->fields;
-  tensor_list.push_back(output_var);
-  for (int i = 0; i < static_cast<int>(tensor_list.size()); i++) {
+  Map<tir::Var, Expr> input_var_to_relax_expr;
+  Array<Expr> input_list = Downcast<Tuple>(call->args[1])->fields;
+  input_list.push_back(output_var);
+  for (int i = 0; i < static_cast<int>(input_list.size()); i++) {
     if (func->buffer_map.count(func->params[i])) {
-      tir_var_to_relax_expr.Set(func->params[i], tensor_list[i]);
+      input_var_to_relax_expr.Set(func->params[i], input_list[i]);
     }
   }
+  int num_params = func->params.size();
+  int num_outputs = GetNumOutput(call);
   for (const auto& var_axis_group : tir_var_axis_group_list) {
-    int output_idx = -1;
+    std::unordered_map<int, int> output_tensor_indices;
     for (int i = 0; i < static_cast<int>(var_axis_group.size()); i++) {
-      if (tir_var_to_relax_expr[var_axis_group[i].first].same_as(output_var)) {
-        output_idx = i;
-        break;
+      for(int j=num_params-num_outputs; j<num_params; j++){
+        if (func->params[j].same_as(var_axis_group[i].first)) {
+          output_tensor_indices[i] = j - num_params + num_outputs;
+          break;
+        }
       }
     }
-    if (output_idx == -1) {
+    if (output_tensor_indices.empty()) {
       for (int i = 1; i < static_cast<int>(var_axis_group.size()); i++) {
         axis_group_graph->JoinAxis(
-            {tir_var_to_relax_expr[var_axis_group[i].first].get(), var_axis_group[i].second},
-            {tir_var_to_relax_expr[var_axis_group[0].first].get(), var_axis_group[0].second},
+            {input_var_to_relax_expr[var_axis_group[i].first].get(), var_axis_group[i].second},
+            {input_var_to_relax_expr[var_axis_group[0].first].get(), var_axis_group[0].second},
             distributed::AxisGroupGraph::EdgeType::kSimbling);
       }
     } else {
-      for (int i = 0; i < static_cast<int>(var_axis_group.size()); i++) {
-        if (i != output_idx) {
-          axis_group_graph->JoinAxis(
-              {tir_var_to_relax_expr[var_axis_group[i].first].get(), var_axis_group[i].second},
-              {tir_var_to_relax_expr[var_axis_group[output_idx].first].get(),
-               var_axis_group[output_idx].second},
-              distributed::AxisGroupGraph::EdgeType::kDescend);
+      for(const auto& pr: output_tensor_indices){
+        for (int i = 0; i < static_cast<int>(var_axis_group.size()); i++) {
+          if (!output_tensor_indices.count(i)) {
+            axis_group_graph->JoinAxis(
+                {input_var_to_relax_expr[var_axis_group[i].first].get(), var_axis_group[i].second},
+                {output_var.get(), var_axis_group[pr.first].second, pr.second},
+                distributed::AxisGroupGraph::EdgeType::kDescend);
+          }
         }
       }
     }

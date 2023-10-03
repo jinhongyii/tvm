@@ -136,7 +136,7 @@ class BufferAxisGraphExtractor : public StmtExprVisitor {
             if (mapped_axis_set.count({another_buffer, j})) {
               continue;
             }
-            if (analyzer.CanProveEqual(indices[i], another_indices[j])) {
+            if (analyzer.CanProveEqual(indices[i], another_indices[j]) && analyzer.CanProveEqual(buffer->shape[i], another_buffer->shape[j])) {
               mapped_axis_set.insert({another_buffer, j});
               JoinBufferAxis({buffer, i}, {another_buffer, j});
             }
@@ -171,12 +171,13 @@ namespace distributed {
 struct Axis {
   const ExprNode* tensor;
   int dim = 0;
+  int tuple_index = 0;
 
-  Axis(const ExprNode* tensor, int dim) : tensor(tensor), dim(dim) {
+  Axis(const ExprNode* tensor, int dim, int tuple_index=0) : tensor(tensor), dim(dim), tuple_index(tuple_index) {
     ICHECK(tensor->IsInstance<ConstantNode>() || tensor->IsInstance<VarNode>());
   }
 
-  bool operator==(const Axis& other) const { return tensor == other.tensor && dim == other.dim; }
+  bool operator==(const Axis& other) const { return tensor == other.tensor && dim == other.dim && tuple_index == other.tuple_index; }
 };
 
 class AxisHash {
@@ -184,7 +185,8 @@ class AxisHash {
   size_t operator()(const Axis& axis) const {
     size_t const h1(std::hash<const ExprNode*>()(axis.tensor));
     size_t const h2(std::hash<int>()(axis.dim));
-    return h1 ^ (h2 << 1);
+    size_t const h3(std::hash<int>()(axis.tuple_index));
+    return h1 ^ (h2 << 1) ^ (h3 << 2);
   }
 };
 
@@ -305,6 +307,8 @@ class AxisGroupGraph {
    *              kSimbling means other cases
    */
   void JoinAxis(Axis axis1, Axis axis2, EdgeType type) {
+    LOG(INFO) << "Join axis: (" << GetRef<Expr>(axis1.tensor) << ", " << axis1.dim << ", " << axis1.tuple_index << ") and ("
+              << GetRef<Expr>(axis2.tensor) << ", " << axis2.dim << ", " << axis2.tuple_index << ")";
     AddEdge(axis1, axis2, type);
     AddEdge(axis2, axis1, ReverseEdgeType(type));
   }
