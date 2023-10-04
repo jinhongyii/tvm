@@ -28,6 +28,35 @@
 #include <numeric>
 
 namespace tvm {
+namespace tir{
+Var GetShardingVarFromIndex(PrimExpr index, Map<Var, Range> var_range, arith::Analyzer* analyzer){
+  if(index.as<VarNode>()){
+    return Downcast<Var>(index);
+  }
+  arith::IterSumExpr iter_sum = arith::NormalizeToIterSum(index, var_range, analyzer);
+  if(!is_zero(iter_sum->base)){
+    return Var();
+  }
+  if(iter_sum->args.empty()){
+    return Var();
+  }
+  // floormod(floordiv(source, lower_factor), extent) * scale
+  arith::IterSplitExpr highest_iter_split = iter_sum->args[0];
+  const auto* source_var = highest_iter_split->source->source.as<VarNode>();
+  if(!source_var){
+    return Var();
+  }
+  // the floormod must take no effect
+  if(!analyzer->CanProve(floordiv(var_range[GetRef<Var>(source_var)]->extent, highest_iter_split->lower_factor) <= highest_iter_split->extent)){
+    return Var();
+  }
+  return GetRef<Var>(source_var);
+}
+} // namespace tir
+} // namespace tvm
+
+
+namespace tvm {
 
 namespace relax {
 namespace distributed {

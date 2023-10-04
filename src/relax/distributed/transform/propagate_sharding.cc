@@ -464,30 +464,42 @@ class DistributedIRBuilder : public ExprMutator {
     return Call(n);
   }
 
+  Expr RemoveAnnotateSharding(Call call){
+    static const Op& annotate_sharding_op = Op::Get("relax.dist.annotate_sharding");
+    if (call->op.same_as(annotate_sharding_op)) {
+      return call->args[0];
+    } else {
+      return call;
+    }
+  }
+
+
+  Expr InsertRedistribute(Expr expr, DeviceMesh device_mesh, Placement placement){
+    return redistribute(expr, device_mesh, placement);
+  }
+
+
   void VisitBinding_(const VarBindingNode* binding, const CallNode* val) {
-    const auto* sinfo = GetStructInfoAs<TensorStructInfoNode>(binding->var);
-    if (!sinfo) {
+    Array<TensorStructInfo> orig_output_tensor_sinfos;
+    if(const auto* tensor_sinfo = GetStructInfoAs<TensorStructInfoNode>(binding->var)){
+      orig_output_tensor_sinfos.push_back(GetRef<TensorStructInfo>(tensor_sinfo));
+    } else if(const auto* tuple_sinfo = GetStructInfoAs<TupleStructInfoNode>(binding->var)){
+      for(const auto& sinfo: tuple_sinfo->fields) {
+        orig_output_tensor_sinfos.push_back(Downcast<TensorStructInfo>(sinfo));
+      }
+    } else{
       ExprMutator::VisitBinding_(binding, val);
       return;
     }
-    int ndim = sinfo->ndim;
-    bool insert_redistribute = false;
 
     // get annotated sinfo from axis group graph
     DeviceMesh device_mesh =
         std::get<0>(axis_group_graph_.GetAxisShardingSpec({binding->var.get(), -1})).first;
     Array<Placement> placements; // every tuple element has a placement
-    int num_outputs;
-    if(binding->var->struct_info_.as<TensorStructInfoNode>()){
-      num_outputs = 1;
-    } else {
-      num_outputs = binding->var->struct_info_.as<TupleStructInfoNode>()->fields.size();
-    }
-    for (int idx = 0;idx<num_outputs;idx++){
+    for (int idx = 0;idx<static_cast<int>(orig_output_tensor_sinfos.size());idx++){
       Array<PlacementSpec> placement_specs(
           std::vector<PlacementSpec>(device_mesh->shape.size(), PlacementSpec::Replica()));
-
-      for (int i = 0; i < ndim; i++) {
+      for (int i = 0; i < orig_output_tensor_sinfos[idx]->ndim; i++) {
         AxisShardingSpec sharding_spec;
         bool has_sharding_spec;
         std::tie(sharding_spec, has_sharding_spec) =
@@ -511,45 +523,40 @@ class DistributedIRBuilder : public ExprMutator {
         new_call->struct_info_ = new_dtensor_sinfo;
       }
     }
-    Expr new_value = builder_->Normalize(new_call);
+    new_call = Downcast<Call>(builder_->Normalize(new_call));
 
-    if(const auto* inferred_dtensor_sinfo = new_value->struct_info_.as<DTensorStructInfoNode>()){
+    if(const auto* inferred_dtensor_sinfo = new_call->struct_info_.as<DTensorStructInfoNode>()){
+      Expr new_value = RemoveAnnotateSharding(new_call);
       if (!StructuralEqual()(DTensorStructInfo(inferred_dtensor_sinfo->tensor_sinfo, device_mesh,
                                           placements[0]),
-                          new_value->struct_info_)) {
-        insert_redistribute = true;
+                          new_call->struct_info_)) {
+        new_value = InsertRedistribute(new_value, device_mesh, placements[0]);
       }
+      ReEmitBinding(binding, builder_->Normalize(new_value));
     } else{
-      const auto* inferred_tuple_sinfo = new_value->struct_info_.as<TupleStructInfoNode>();
-      ICHECK(inferred_tuple_sinfo);
+      LOG(INFO) << new_call;
+      const auto* inferred_tuple_sinfo = new_call->struct_info_.as<TupleStructInfoNode>();
+      ICHECK(inferred_tuple_sinfo) << new_call;
+      Var new_var = builder_->Emit(new_call);
+      var_remap_[binding->var->vid]= new_var;
       for (int i = 0; i < inferred_tuple_sinfo->fields.size(); i++) {
-        if (!StructuralEqual()(DTensorStructInfo(Downcast<TensorStructInfo>(inferred_tuple_sinfo->fields[i]), device_mesh,
+        if (!StructuralEqual()(DTensorStructInfo(Downcast<DTensorStructInfo>(inferred_tuple_sinfo->fields[i])->tensor_sinfo, device_mesh,
                                             placements[i]),
-                            new_value->struct_info_)) {
-          LOG(FATAL) << "Invalid sharding annotation on "<< GetRef<Call>(val) << "."
-                     << "The inferred tuple struct info is inconsistent with the annotated one.";
+                            inferred_tuple_sinfo->fields[i])) {
+          Var redistribute_var = builder_->Emit(InsertRedistribute(TupleGetItem(new_var, i), device_mesh, placements[i]));
+          tuple_getitem_remap_[TupleGetItem(binding->var, i)]=  redistribute_var;
         }
       }
     }
+  }
 
-    static const Op& annotate_sharding_op = Op::Get("relax.dist.annotate_sharding");
-    if (val->op.same_as(annotate_sharding_op)) {
-      if (insert_redistribute) {
-        Expr redistribute_call =
-            redistribute(new_call->args[0], device_mesh, placements[0]);
-        redistribute_call = builder_->Normalize(redistribute_call);
-        ReEmitBinding(binding, redistribute_call);
-      } else {
-        ReEmitBinding(binding, new_call->args[0]);
-      }
+  void VisitBinding_(const VarBindingNode* binding, const TupleGetItemNode* val) {
+    LOG(INFO)<<GetRef<TupleGetItem>(val);
+    if (tuple_getitem_remap_.count(GetRef<TupleGetItem>(val))) {
+      LOG(INFO) << "successfully replace";
+      var_remap_[binding->var->vid] = tuple_getitem_remap_[GetRef<TupleGetItem>(val)];
     } else {
-      if (insert_redistribute) {
-        Expr redistribute_call = redistribute(new_call, device_mesh, placements[0]);
-        redistribute_call = builder_->Normalize(redistribute_call);
-        ReEmitBinding(binding, redistribute_call);
-      } else {
-        ReEmitBinding(binding, new_call);
-      }
+      ExprMutator::VisitBinding_(binding, val);
     }
   }
 
@@ -562,6 +569,7 @@ class DistributedIRBuilder : public ExprMutator {
   }
 
   Map<Var, Var> input_tensor_remap_;
+  std::unordered_map<TupleGetItem, Var, StructuralHash, StructuralEqual> tuple_getitem_remap_;
   AxisGroupGraph axis_group_graph_;
 };
 namespace transform {

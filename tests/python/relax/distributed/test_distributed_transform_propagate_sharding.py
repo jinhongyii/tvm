@@ -21,7 +21,7 @@ from tvm.script.parser import ir as I
 from tvm.script.parser import relax as R
 from tvm.script.parser import tir as T
 import tvm
-from tvm import relax
+from tvm import relax, tir
 from tvm.ir import assert_structural_equal
 import tvm.testing
 
@@ -1146,6 +1146,12 @@ def test_decoder_layer():
     after = relax.distributed.transform.PropagateSharding()(mod)
     assert_structural_equal(after, ShardedLlamaAttentionLayer)
 
+def test_decoder_layer_tir():
+    mod = relax.transform.LegalizeOps()(LlamaAttentionLayer)
+    mod = tir.transform.Simplify()(mod)
+    after = relax.distributed.transform.PropagateSharding()(mod)
+    print(after)
+
 
 def test_decoder_layer_dynamic_shape():
     # mod = relax.transform.LegalizeOps({"relax.reshape": lambda bb, call: bb.normalize(call)})(LlamaAttentionLayer)
@@ -1155,5 +1161,6 @@ def test_decoder_layer_dynamic_shape():
 
 
 if __name__ == "__main__":
-    # tvm.testing.main()
-    test_mlp_with_tuple()
+    tvm.testing.main()
+    # test_mlp_with_tuple()
+    # test_decoder_layer_tir()

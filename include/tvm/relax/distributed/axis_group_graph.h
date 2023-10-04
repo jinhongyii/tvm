@@ -46,11 +46,15 @@ class BufferAxisHash {
     return h1 ^ (h2 << 1);
   }
 };
+
+Var GetShardingVarFromIndex(PrimExpr index, Map<Var, Range> var_range, arith::Analyzer* analyzer);
+
 class BufferAxisGraphExtractor : public StmtExprVisitor {
  public:
 
   static std::vector<std::vector<TIRVarAxis>> GetTIRVarAxisGraph(const PrimFunc& prim_func) {
     BufferAxisGraphExtractor extractor;
+    // LOG(INFO) << prim_func;
     extractor(prim_func->body);
     Map<Buffer, Var> inverse_buffer_map;
     for (const auto& pr : prim_func->buffer_map) {
@@ -120,32 +124,15 @@ class BufferAxisGraphExtractor : public StmtExprVisitor {
     }
     Var var = Downcast<Var>(a);
     // index var `a` must access whole range of a specific buffer dimension
-    if(!analyzer->CanProveEqual(buffer_shape_a, iter_var_range_[var]->extent)){
-      LOG(INFO) << "fail because shape mismatch";
+    arith::IntSet intset_b = arith::EvalSet(b, arith::AsIntSet(iter_var_range_));
+    if (!analyzer->CanProveEqual(buffer_shape_a, iter_var_range_[var]->extent) ||
+        !intset_b.MatchRange(Range::FromMinExtent(0, buffer_shape_b))) {
+      // LOG(INFO) << "fail because shape mismatch";
       return false;
     }
-    arith::IterSumExpr iter_sum = arith::NormalizeToIterSum(b, iter_var_range_, analyzer);
-    // base must be zero
-    if(!is_zero(iter_sum->base)){
-      LOG(INFO) << "fail because base zero";
-      return false;
-    }
-    if(iter_sum->args.empty()){
-      LOG(INFO)<<"fail because args empty";
-      return false;
-    }
-    // floormod(floordiv(source, lower_factor), extent) * scale
-    arith::IterSplitExpr highest_iter_split = iter_sum->args[0];
-    const auto* source_var = highest_iter_split->source->source.as<VarNode>();
-    //source must be `a`
-    if(!source_var || source_var != var.get()){
-      LOG(INFO) << highest_iter_split->source <<" vs "<< var;
-      LOG(INFO) << "fail because source not `a`";
-      return false;
-    }
-    //extent must be 1
-    if(!is_one(highest_iter_split->extent)){
-      LOG(INFO) << "fail because extent not 1";
+    Var matched_var = GetShardingVarFromIndex(b, iter_var_range_, analyzer);
+    if(!matched_var.same_as(var)){
+      // LOG(INFO) << "fail because not matched var";
       return false;
     }
     return true;
@@ -174,8 +161,8 @@ class BufferAxisGraphExtractor : public StmtExprVisitor {
           Buffer another_buffer = another_access_pr.first;
           Array<PrimExpr> another_indices = another_access_pr.second;
           for (int j = 0; j < static_cast<int>(another_indices.size()); j++) {
-            LOG(INFO)<< "Match: " << indices[i] << " " << buffer->shape[i] << " " << another_indices[j] << " " << another_buffer->shape[j];
-            LOG(INFO)<< "result:"<< Match(indices[i], buffer->shape[i], another_indices[j], another_buffer->shape[j], &analyzer);
+            // LOG(INFO)<< "Match: " << indices[i] << " " << buffer << " " << another_indices[j] << " " << another_buffer;
+            // LOG(INFO)<< "result:"<< Match(indices[i], buffer->shape[i], another_indices[j], another_buffer->shape[j], &analyzer);
             if (Match(indices[i], buffer->shape[i], another_indices[j], another_buffer->shape[j], &analyzer)) {
               JoinBufferAxis({buffer, i}, {another_buffer, j});
             }
@@ -199,6 +186,7 @@ class BufferAxisGraphExtractor : public StmtExprVisitor {
   std::vector<std::pair<Buffer, Array<PrimExpr>>> buffer_access_indices_;
   std::unordered_map<BufferAxis, std::vector<BufferAxis>, BufferAxisHash> buffer_axis_graph_;
   Map<Var, Range> iter_var_range_;
+  std::string func_name;
 };
 } // namespace tir
 } // namespace tvm
@@ -381,6 +369,7 @@ class AxisGroupGraph {
    * \param spec The spec to stop propagation
    */
   void AddPropagationCutPoint(Axis axis, AxisShardingSpec spec) {
+    LOG(INFO)<<"add cutpoint at "<< GetRef<Expr>(axis.tensor) << " " << axis.dim << " " << axis.tuple_index;
     cutpoint_axis_sharding_spec_[axis] = spec;
   }
 
@@ -440,6 +429,8 @@ class AxisGroupGraph {
           it++;
         }
       }
+      LOG(INFO) << "axis: (" << GetRef<Expr>(axis.tensor) << ", " << axis.dim << ", " << axis.tuple_index << ") has "
+                << (*specs.begin()).first.second << " placement";
       ICHECK(specs.size() == 1) << "multiple possible sharding for axis: ("
                                 << GetRef<Expr>(axis.tensor) << ", " << axis.dim << ")";
     }

@@ -31,7 +31,7 @@ from tvm.script.parser import ir as I
 from tvm.script.parser import relax as R
 from tvm.script.parser import tir as T
 from tvm import get_global_func
-from tvm import relax
+from tvm import relax, tir
 
 _all_session_kinds = [di.ThreadedSession, di.ProcessSession]
 _ccl = [get_global_func("runtime.disco.compiled_ccl")()]
@@ -488,12 +488,13 @@ def test_attention_combine_qkv(session_kind, ccl):  # pylint: disable=too-many-l
     with tempfile.TemporaryDirectory() as tmpdir:
         path = tmpdir + "/test.so"
         sharded_mod = AttentionStep2
-        sharded_mod = relax.transform.LegalizeOps({"relax.reshape": (lambda bb, call: call)})(sharded_mod)
-        print(sharded_mod)
+        sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
+        sharded_mod = tir.transform.Simplify()(sharded_mod)
+        # print(sharded_mod)
         sharded_mod = relax.distributed.transform.PropagateSharding()(sharded_mod)
-        print(sharded_mod)
         sharded_mod = relax.distributed.transform.LowerGlobalViewToLocalView()(sharded_mod)
-        sharded_mod = relax.distributed.transform.LowerDistIR()(sharded_mod)
+        print(sharded_mod)
+        # sharded_mod = relax.distributed.transform.LowerDistIR()(sharded_mod)
     #     relax_build(sharded_mod, target).export_library(path)
 
     #     mod = sess.load_vm_module(path)

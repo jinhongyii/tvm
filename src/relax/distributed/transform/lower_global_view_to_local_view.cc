@@ -210,7 +210,12 @@ class DistributedBufferCompactor: StmtExprMutator {
     for(const auto& write: block->writes){
       buffers.push_back(write->buffer);
     }
-    for(const auto& buffer: buffers){
+    Map<Var, Range> iter_var_range;
+    for(const auto& iter_var: block->iter_vars){
+      iter_var_range.Set(iter_var->var, iter_var->dom);
+    }
+    arith::Analyzer analyzer;
+    for (const auto& buffer : buffers) {
       if(buffer_access_indices.count(buffer) == 0 || buffer_shards_.count(buffer) == 0){
         continue;
       }
@@ -220,8 +225,7 @@ class DistributedBufferCompactor: StmtExprMutator {
         for (const auto& pr: dim_shards){
           int dim = pr.first;
           int shard = pr.second;
-          LOG(INFO) << buffer<<" dimension "<<dim << ", shard:" << shard;
-          Var var = Downcast<Var>(access_index[dim]);
+          Var var = GetShardingVarFromIndex(access_index[dim], iter_var_range, &analyzer);
           ICHECK(!iter_var_shards_.count(var) || iter_var_shards_[var] == shard)
               << "A loop cannot have different sharding";
           iter_var_shards_[var] = shard;
