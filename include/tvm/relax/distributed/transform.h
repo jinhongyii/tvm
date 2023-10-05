@@ -62,6 +62,13 @@ TVM_DLL Pass LowerGlobalViewToLocalView();
  */
 TVM_DLL Pass LowerDistIR();
 
+/*!
+ * \brief Legalize redistribute op to ccl op.
+ *
+ * \return The Pass.
+ */
+TVM_DLL Pass LegalizeRedistribute();
+
 }  // namespace transform
 }  // namespace distributed
 }  // namespace relax

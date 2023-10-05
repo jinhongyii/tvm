@@ -109,12 +109,9 @@ private:
     if(!num_inputs.defined()){
       return;
     }
-    for (int i = 0; i < num_inputs.value()->value; i++) {
+    for (int i = 0; i < func->params.size(); i++) {
       auto sinfo = GetStructInfoAs<DTensorStructInfoNode>(func->params[i]);
-      for(const auto& dim_spec: sinfo->placement->dim_specs){
-        ICHECK(dim_spec->kind == PlacementSpecKind::kReplica)
-            << "Input tensor sharding is not supported now";
-      }
+      // ICHECK()
       Var old_input = param_tensor_remap_.at(func->params[i]);
       input_preprocessing_.Set(broadcast_from_worker0(old_input), func->params[i]);
     }

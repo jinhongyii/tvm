@@ -67,6 +67,9 @@ StructInfo InferDistStructInfoScatter(const Call& call, const BlockBuilder& ctx)
 }
 
 
+TVM_REGISTER_OP("relax.ccl.scatter_from_local")
+    .set_attr<FInferStructInfo>("dist.FInferStructInfo", InferDistStructInfoScatter);
+
 }  // namespace distributed
 }  // namespace relax
 }  // namespace tvm
