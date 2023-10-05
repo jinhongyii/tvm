@@ -86,6 +86,8 @@ private:
         // "S[x]" -> "S[y]"
         if(input_spec->axis != output_spec->axis){
           LOG(FATAL) << "AlltoAll not implemented yet";
+        } else {
+          return call->args[0];
         }
       } else if(input_spec->kind == PlacementSpecKind::kSharding &&
         output_spec->kind == PlacementSpecKind::kReplica){

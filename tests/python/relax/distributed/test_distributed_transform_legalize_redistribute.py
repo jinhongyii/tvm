@@ -26,8 +26,8 @@ import tvm.testing
 
 @I.ir_module
 class TestSimple:
-    I.module_attrs({"device_num": 10})
-    I.module_global_infos({"mesh": [R.device_mesh((2,), I.Range(0, 2)), R.device_mesh((1,), I.Range(4, 5))]})
+    I.module_attrs({"device_num": 2})
+    I.module_global_infos({"mesh": [R.device_mesh((2,), I.Range(0, 2))]})
 
     @R.function
     def foo(x1: R.DTensor((128, 128), "float32", "mesh[0]", "R"), x2: R.DTensor((128, 128), "float32", "mesh[0]", "S[0]")):
@@ -38,10 +38,22 @@ class TestSimple:
         lv1 = R.dist.redistribute(x2, "mesh[0]", "S[0]")
         return (lv0, lv1)
     
+    
+@I.ir_module
+class LegalizedOutput:
+    I.module_attrs({"device_num": 2})
+    I.module_global_infos({"mesh": [R.device_mesh((2,), I.Range(0, 2))]})
+    @R.function
+    def foo(x1: R.DTensor((128, 128), "float32", "mesh[0]", "R"), x2: R.DTensor((128, 128), "float32", "mesh[0]", "S[0]")) -> R.Tuple(R.DTensor((128, 128), "float32", "mesh[0]", "S[1]"), R.DTensor((128, 128), "float32", "mesh[0]", "S[0]")):
+        R.func_attr({"num_input": 1})
+        lv0: R.DTensor((128, 64), "float32", "mesh[0]", "S[1]") = R.ccl.scatter_from_local(x1, num_workers=2, tensor_dim=1)
+        lv1: R.DTensor((128, 128), "float32", "mesh[0]", "S[0]") = x2
+        return (lv0, lv1)
+
 def test_simple():
     mod = TestSimple
     mod = relax.distributed.transform.LegalizeRedistribute()(mod)
-    print(mod)
+    tvm.ir.assert_structural_equal(mod, LegalizedOutput)
     
 if __name__ == "__main__":
     test_simple()

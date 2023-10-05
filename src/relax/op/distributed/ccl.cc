@@ -57,13 +57,14 @@ StructInfo InferDistStructInfoScatter(const Call& call, const BlockBuilder& ctx)
   }
 
   Array<PrimExpr> output_shape = input_shape.value();
-  output_shape.Set(0, div(output_shape[0], num_workers));
+  output_shape.Set(attrs->tensor_dim, div(output_shape[0], num_workers));
   auto new_tensor_sinfo = make_object<TensorStructInfoNode>(*tensor_sinfo.get());
   new_tensor_sinfo->shape = ShapeExpr(output_shape);
   DeviceMesh device_mesh = input_dtensor_sinfo->device_mesh;
   //FIXME: this is a hack where there's only 1d mesh
+  ICHECK(device_mesh->shape.size() == 1);
   return DTensorStructInfo(TensorStructInfo(new_tensor_sinfo), device_mesh,
-                           Placement::FromText(std::string(device_mesh->shape.size(), 'S')));
+                           Placement::FromText("S[" + std::to_string(attrs->tensor_dim) + "]"));
 }
 
 

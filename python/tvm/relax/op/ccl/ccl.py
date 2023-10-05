@@ -105,7 +105,7 @@ def scatter_from_worker0(x: Expr, num_workers: int, tensor_dim: int = 0) -> Expr
     """
     return _ffi_api.scatter_from_worker0(x, num_workers, tensor_dim)
 
-def scatter_from_local(x: Expr, num_workers: int) -> Expr:
+def scatter_from_local(x: Expr, num_workers: int, tensor_dim: int = 0) -> Expr:
     """Perform a scatter operation locally with no communication, chunking the given buffer into equal parts 
        and only keeping one chunk per device.
        This operation assumes the input tensor are the same on each device.
@@ -118,9 +118,12 @@ def scatter_from_local(x: Expr, num_workers: int) -> Expr:
     num_worker : int
       The number of workers, i.e. the number of parts the given buffer should be chunked into.
 
+    tensor_dim : int
+      The dimension of the tensor to be scattered. Default is 0.
+      
     Returns
     -------
     result : relax.Expr
       Chunked Tensor kept by each device.
     """
-    return _ffi_api.scatter_from_local(x, num_workers)
+    return _ffi_api.scatter_from_local(x, num_workers, tensor_dim)
