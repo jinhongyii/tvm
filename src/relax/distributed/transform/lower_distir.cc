@@ -209,6 +209,11 @@ private:
 
   Map<Var, Var> param_tensor_remap_;
   Map<Expr, Var> input_preprocessing_;
+  //todo: broadcast every "R" input
+  //todo: for every "S" input, insert shard and scatter directly in the beginning
+  //todo: postpone broadcast
+  //      if the operands are "R" on the device mesh dim of the broadcast, then broadcast be moved across this operator
+  //      broadcast can be fused with local scatter(slice) and become scatter_from_worker0
   Map<Var, Var> input_tensor_remap_;
 };
 

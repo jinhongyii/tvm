@@ -44,6 +44,8 @@ Expr broadcast_from_worker0(Expr data);
 /*! \brief Perform a scatter operation from worker-0, chunking the given buffer into equal parts. */
 Expr scatter_from_worker0(Expr data, int num_workers);
 
+/*! \brief Perform a scatter operation locally with no communication, chunking the given buffer into equal parts. */
+Expr scatter_from_local(Expr data, int num_workers);
 }  // namespace relax
 }  // namespace tvm
 
