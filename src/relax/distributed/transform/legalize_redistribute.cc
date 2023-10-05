@@ -60,7 +60,7 @@ private:
     }
     return builder_->GetContextIRModule();
   }
-
+  using ExprMutator::VisitExpr_;
   Expr VisitExpr_(const CallNode* op) final{
     Call call = Downcast<Call>(ExprMutator::VisitExpr_(op));
     static Op redistribute_op = Op::Get("relax.dist.redistribute");
