@@ -495,7 +495,7 @@ def test_attention_combine_qkv(session_kind, ccl):  # pylint: disable=too-many-l
         sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
         sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
         sharded_mod = relax.transform.LiftTransformParams()(sharded_mod)
-
+        sharded_mod = relax.transform.BundleModelParams()(sharded_mod)
         relax_build(sharded_mod, target).export_library(path)
 
         mod = sess.load_vm_module(path)
@@ -510,10 +510,7 @@ def test_attention_combine_qkv(session_kind, ccl):  # pylint: disable=too-many-l
         f_make_tuple = sess.get_global_func("vm.builtin.make_tuple")
         d_orig_param = f_make_tuple(d_Wqkv, d_Wo)
         d_transformed_param = mod["main_transform_params"](d_orig_param)
-        f_tuple_getitem = sess.get_global_func("vm.builtin.tuple_getitem")
-        d_param_0 = f_tuple_getitem(d_transformed_param, 0)
-        d_param_1 = f_tuple_getitem(d_transformed_param, 1)
-        d_Y = mod["main"](d_X, d_param_0, d_param_1)
+        d_Y = mod["main"](d_X, d_transformed_param)
         Y_result = tvm.nd.empty((1, 10, 8192), "float32", device=dev)
         sess.copy_from_worker_0(Y_result, d_Y)
         sess.sync_worker_0()
