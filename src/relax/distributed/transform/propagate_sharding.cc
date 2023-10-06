@@ -153,7 +153,6 @@ class AxisGroupGraphBuilder : public ExprVisitor {
     static const Op& call_tir_op = Op::Get("relax.call_tir");
     if (val->op.same_as(call_tir_op)) {
       if (Optional<tir::PrimFunc> func = MatchPrimFunc(mod_, val->args[0])) {
-        LOG(INFO)<<GetRef<Call>(val);
         BuildAxisGraphCallTIR(binding->var, GetRef<Call>(val), func.value(), axis_group_graph_);
       }
     }
@@ -534,7 +533,6 @@ class DistributedIRBuilder : public ExprMutator {
       }
       ReEmitBinding(binding, builder_->Normalize(new_value));
     } else{
-      LOG(INFO) << new_call;
       const auto* inferred_tuple_sinfo = new_call->struct_info_.as<TupleStructInfoNode>();
       ICHECK(inferred_tuple_sinfo) << new_call;
       Var new_var = builder_->Emit(new_call);
@@ -551,9 +549,7 @@ class DistributedIRBuilder : public ExprMutator {
   }
 
   void VisitBinding_(const VarBindingNode* binding, const TupleGetItemNode* val) {
-    LOG(INFO)<<GetRef<TupleGetItem>(val);
     if (tuple_getitem_remap_.count(GetRef<TupleGetItem>(val))) {
-      LOG(INFO) << "successfully replace";
       var_remap_[binding->var->vid] = tuple_getitem_remap_[GetRef<TupleGetItem>(val)];
     } else {
       ExprMutator::VisitBinding_(binding, val);

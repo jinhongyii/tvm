@@ -84,14 +84,22 @@ private:
     return TensorStructInfo(new_tensor_sinfo);
   }
 
-  StructInfo ShardSinfo(StructInfo orig_sinfo){
+  StructInfo ConvertSinfo(StructInfo orig_sinfo, bool shard_shape){
     if(const auto* dtensor_sinfo = orig_sinfo.as<DTensorStructInfoNode>()){
-      return ShardDTensorSinfo(GetRef<DTensorStructInfo>(dtensor_sinfo));
+      if(shard_shape){
+        return ShardDTensorSinfo(GetRef<DTensorStructInfo>(dtensor_sinfo));
+      } else {
+        return dtensor_sinfo->tensor_sinfo;
+      }
     } else if(const auto* tuple_sinfo = orig_sinfo.as<TupleStructInfoNode>()){
       Array<StructInfo> new_fields;
       for(const auto& field_sinfo: tuple_sinfo->fields){
         if(const auto* dtensor_sinfo = field_sinfo.as<DTensorStructInfoNode>()){
-          new_fields.push_back(ShardDTensorSinfo(GetRef<DTensorStructInfo>(dtensor_sinfo)));
+          if(shard_shape){
+            new_fields.push_back(ShardDTensorSinfo(GetRef<DTensorStructInfo>(dtensor_sinfo)));
+          } else {
+            new_fields.push_back(dtensor_sinfo->tensor_sinfo);
+          }
         } else {
           new_fields.push_back(field_sinfo);
         }
@@ -102,10 +110,11 @@ private:
     }
   }
 
+
   Expr ShardInputParamTensorAndConstant(Expr input){
     ICHECK(input->struct_info_);
     StructInfo old_sinfo = GetStructInfo(input);
-    StructInfo new_sinfo = ShardSinfo(old_sinfo);
+    StructInfo new_sinfo = ConvertSinfo(old_sinfo, false);
     if (const auto* var = input.as<VarNode>()) {
       Var new_param(var->name_hint(), new_sinfo);
       return new_param;
@@ -129,11 +138,9 @@ private:
         ICHECK(dtensor_sinfo->device_mesh->shape.size() == 1);
         PlacementSpec sharding_spec = dtensor_sinfo->placement->dim_specs[0];
         if(sharding_spec->kind == PlacementSpecKind::kReplica){
-          LOG(INFO) << "emit broadcast";
           Var new_var = builder_->Emit(broadcast_from_worker0(new_params_[i]));
           var_remap_[param->vid] = new_var;
         } else if(sharding_spec->kind == PlacementSpecKind::kSharding){
-          LOG(INFO) << "emit scatter";
           Var scatter_var = builder_->Emit(scatter_from_worker0(new_params_[i], dtensor_sinfo->device_mesh->shape[0], sharding_spec->axis));
           var_remap_[param->vid] = scatter_var;
         } else {
@@ -195,7 +202,7 @@ private:
     } else if(call->op.same_as(call_tir_local_view_op)){
       auto new_call_node = make_object<CallNode>(*call);
       new_call_node->op = call_tir_op;
-      new_call_node->sinfo_args = {ShardSinfo(GetStructInfo(binding_var))};
+      new_call_node->sinfo_args = {ConvertSinfo(GetStructInfo(binding_var), true)};
       return Call(new_call_node);
     } else if(call->op.same_as(call_tir_op)){
       LOG(FATAL)<<"call_tir should be lowered to call_tir_local_view before lowering to relax";

@@ -120,9 +120,10 @@ def test_mlp(session_kind, ccl):  # pylint: disable=too-many-locals
         sharded_mod = relax.distributed.transform.PropagateSharding()(sharded_mod)
         sharded_mod = relax.distributed.transform.LowerGlobalViewToLocalView()(sharded_mod)
         sharded_mod = relax.distributed.transform.LowerDistIR()(sharded_mod)
-        print(sharded_mod)
+        sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
+        sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
+        sharded_mod = relax.transform.LiftTransformParams()(sharded_mod)
 
-        # print(sharded_mod)
         relax_build(sharded_mod, target).export_library(path)
 
         mod = sess.load_vm_module(path)
@@ -148,9 +149,9 @@ def test_mlp(session_kind, ccl):  # pylint: disable=too-many-locals
 @pytest.mark.parametrize("session_kind", _all_session_kinds)
 @pytest.mark.parametrize("ccl", _ccl)
 def test_attention(session_kind, ccl):  # pylint: disable=too-many-locals,too-many-statements
-    # devices = [0, 1]
-    # sess = session_kind(num_workers=len(devices))
-    # sess.init_ccl(ccl, *devices)
+    devices = [0, 1]
+    sess = session_kind(num_workers=len(devices))
+    sess.init_ccl(ccl, *devices)
 
     # pylint: disable=invalid-name
     @tvm.script.ir_module
@@ -273,7 +274,9 @@ def test_attention(session_kind, ccl):  # pylint: disable=too-many-locals,too-ma
         sharded_mod = relax.distributed.transform.PropagateSharding()(sharded_mod)
         sharded_mod = relax.distributed.transform.LowerGlobalViewToLocalView()(sharded_mod)
         sharded_mod = relax.distributed.transform.LowerDistIR()(sharded_mod)
-        print(sharded_mod)
+        sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
+        sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
+        sharded_mod = relax.transform.LiftTransformParams()(sharded_mod)
         relax_build(sharded_mod, target).export_library(path)
 
         mod = sess.load_vm_module(path)
@@ -305,9 +308,9 @@ def test_attention(session_kind, ccl):  # pylint: disable=too-many-locals,too-ma
 @pytest.mark.parametrize("session_kind", _all_session_kinds)
 @pytest.mark.parametrize("ccl", _ccl)
 def test_attention_combine_qkv(session_kind, ccl):  # pylint: disable=too-many-locals,too-many-statements
-    # devices = [0, 1]
-    # sess = session_kind(num_workers=len(devices))
-    # sess.init_ccl(ccl, *devices)
+    devices = [0, 1]
+    sess = session_kind(num_workers=len(devices))
+    sess.init_ccl(ccl, *devices)
 
     # pylint: disable=invalid-name
     @tvm.script.ir_module
@@ -472,58 +475,53 @@ def test_attention_combine_qkv(session_kind, ccl):  # pylint: disable=too-many-l
             return rx.build(mod, target=target)
 
     # pylint: disable=invalid-name
-    # X = np.random.randn(1, 10, 128).astype("float32")
-    # Wq = np.random.randn(128, 512).astype("float32")
-    # Wk = np.random.randn(128, 512).astype("float32")
-    # Wv = np.random.randn(128, 512).astype("float32")
-    # Wo = np.random.randn(512, 128).astype("float32")
-    # Y_expected = VirtualMachine(relax_build(Attention, target), device=dev)["main"](
-    #     tvm.nd.array(X, device=dev),
-    #     tvm.nd.array(Wq, device=dev),
-    #     tvm.nd.array(Wk, device=dev),
-    #     tvm.nd.array(Wv, device=dev),
-    #     tvm.nd.array(Wo, device=dev),
-    # ).numpy()
+    X = np.random.randn(1, 10, 8192).astype("float32")
+    Wqkv = np.random.randn(8192, 10240).astype("float32")
+    Wo = np.random.randn(8192, 8192).astype("float32")
+    Y_expected = VirtualMachine(relax_build(AttentionStep1, target), device=dev)["main"](
+        tvm.nd.array(X, device=dev),
+        tvm.nd.array(Wqkv, device=dev),
+        tvm.nd.array(Wo, device=dev),
+    ).numpy()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = tmpdir + "/test.so"
         sharded_mod = AttentionStep2
         sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
-        sharded_mod = tir.transform.Simplify()(sharded_mod)
-        # print(sharded_mod)
         sharded_mod = relax.distributed.transform.PropagateSharding()(sharded_mod)
         sharded_mod = relax.distributed.transform.LowerGlobalViewToLocalView()(sharded_mod)
         sharded_mod = relax.distributed.transform.LegalizeRedistribute()(sharded_mod)
         sharded_mod = relax.distributed.transform.LowerDistIR()(sharded_mod)
+        sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
+        sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
         sharded_mod = relax.transform.LiftTransformParams()(sharded_mod)
-        print(sharded_mod)
 
-    #     relax_build(sharded_mod, target).export_library(path)
+        relax_build(sharded_mod, target).export_library(path)
 
-    #     mod = sess.load_vm_module(path)
+        mod = sess.load_vm_module(path)
 
-    #     d_X = sess.empty((1, 10, 128), "float32")
-    #     d_Wq = sess.empty((128, 256), "float32")
-    #     d_Wk = sess.empty((128, 256), "float32")
-    #     d_Wv = sess.empty((128, 256), "float32")
-    #     d_Wo = sess.empty((256, 128), "float32")
+        d_X = sess.empty((1, 10, 8192), "float32")
+        d_Wqkv = sess.empty((8192, 10240), "float32")
+        d_Wo = sess.empty((8192, 8192), "float32")
 
-    #     d_X.debug_copy_from(0, X)
-    #     d_Wq.debug_copy_from(0, Wq[:, :256])
-    #     d_Wq.debug_copy_from(1, Wq[:, 256:])
-    #     d_Wk.debug_copy_from(0, Wk[:, :256])
-    #     d_Wk.debug_copy_from(1, Wk[:, 256:])
-    #     d_Wv.debug_copy_from(0, Wv[:, :256])
-    #     d_Wv.debug_copy_from(1, Wv[:, 256:])
-    #     d_Wo.debug_copy_from(0, Wo[:256, :])
-    #     d_Wo.debug_copy_from(1, Wo[256:, :])
-    #     d_Y = mod["main"](d_X, d_Wq, d_Wk, d_Wv, d_Wo)
-    #     Y_result = tvm.nd.empty((1, 10, 128), "float32", device=dev)
-    #     sess.copy_from_worker_0(Y_result, d_Y)
-    #     sess.sync_worker_0()
-    #     Y_result = Y_result.numpy()
-    # # pylint: enable=invalid-name
-    # np.testing.assert_allclose(Y_result, Y_expected, rtol=1e-3, atol=1e-3)
+        d_X.debug_copy_from(0, X)
+        d_Wqkv.debug_copy_from(0, Wqkv)
+        d_Wo.debug_copy_from(0, Wo)
+        f_make_tuple = sess.get_global_func("vm.builtin.make_tuple")
+        d_orig_param = f_make_tuple(d_Wqkv, d_Wo)
+        d_transformed_param = mod["main_transform_params"](d_orig_param)
+        f_tuple_getitem = sess.get_global_func("vm.builtin.tuple_getitem")
+        d_param_0 = f_tuple_getitem(d_transformed_param, 0)
+        d_param_1 = f_tuple_getitem(d_transformed_param, 1)
+        d_Y = mod["main"](d_X, d_param_0, d_param_1)
+        Y_result = tvm.nd.empty((1, 10, 8192), "float32", device=dev)
+        sess.copy_from_worker_0(Y_result, d_Y)
+        sess.sync_worker_0()
+        Y_result = Y_result.numpy()
+    # pylint: enable=invalid-name
+    np.testing.assert_allclose(Y_result, Y_expected, rtol=1e-2, atol=1e-2)
     
 if __name__ == "__main__":
     test_attention_combine_qkv(di.ProcessSession, "rccl")
+    # test_attention(di.ProcessSession, "rccl")
+    # test_mlp(di.ProcessSession, "rccl")

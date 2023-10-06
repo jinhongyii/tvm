@@ -123,6 +123,8 @@ class BufferAxisGraphExtractor : public StmtExprVisitor {
       return false;
     }
     Var var = Downcast<Var>(a);
+    analyzer->Bind(iter_var_range_);
+    b = analyzer->Simplify(b);
     // index var `a` must access whole range of a specific buffer dimension
     arith::IntSet intset_b = arith::EvalSet(b, arith::AsIntSet(iter_var_range_));
     if (!analyzer->CanProveEqual(buffer_shape_a, iter_var_range_[var]->extent) ||
