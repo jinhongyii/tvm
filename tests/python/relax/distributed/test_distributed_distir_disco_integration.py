@@ -148,9 +148,9 @@ def test_mlp(session_kind, ccl):  # pylint: disable=too-many-locals
 @pytest.mark.parametrize("session_kind", _all_session_kinds)
 @pytest.mark.parametrize("ccl", _ccl)
 def test_attention(session_kind, ccl):  # pylint: disable=too-many-locals,too-many-statements
-    devices = [0, 1]
-    sess = session_kind(num_workers=len(devices))
-    sess.init_ccl(ccl, *devices)
+    # devices = [0, 1]
+    # sess = session_kind(num_workers=len(devices))
+    # sess.init_ccl(ccl, *devices)
 
     # pylint: disable=invalid-name
     @tvm.script.ir_module
@@ -305,9 +305,9 @@ def test_attention(session_kind, ccl):  # pylint: disable=too-many-locals,too-ma
 @pytest.mark.parametrize("session_kind", _all_session_kinds)
 @pytest.mark.parametrize("ccl", _ccl)
 def test_attention_combine_qkv(session_kind, ccl):  # pylint: disable=too-many-locals,too-many-statements
-    devices = [0, 1]
-    sess = session_kind(num_workers=len(devices))
-    sess.init_ccl(ccl, *devices)
+    # devices = [0, 1]
+    # sess = session_kind(num_workers=len(devices))
+    # sess.init_ccl(ccl, *devices)
 
     # pylint: disable=invalid-name
     @tvm.script.ir_module
@@ -411,7 +411,7 @@ def test_attention_combine_qkv(session_kind, ccl):  # pylint: disable=too-many-l
             Wqkv: R.Tensor((8192, 10240), "float32"),
             Wo: R.Tensor((8192, 8192), "float32"),
         ) -> R.Tensor((1, 10, 8192), "float32"):
-            R.func_attr({"global_symbol": "main"})
+            R.func_attr({"global_symbol": "main", "num_input": 1})
             with R.dataflow():
                 # q
                 Wqkv_split = R.split(Wqkv, indices_or_sections=[8192, 9216], axis=-1)
@@ -493,7 +493,9 @@ def test_attention_combine_qkv(session_kind, ccl):  # pylint: disable=too-many-l
         # print(sharded_mod)
         sharded_mod = relax.distributed.transform.PropagateSharding()(sharded_mod)
         sharded_mod = relax.distributed.transform.LowerGlobalViewToLocalView()(sharded_mod)
+        sharded_mod = relax.distributed.transform.LegalizeRedistribute()(sharded_mod)
         sharded_mod = relax.distributed.transform.LowerDistIR()(sharded_mod)
+        sharded_mod = relax.transform.LiftTransformParams()(sharded_mod)
         print(sharded_mod)
 
     #     relax_build(sharded_mod, target).export_library(path)

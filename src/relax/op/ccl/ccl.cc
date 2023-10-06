@@ -140,7 +140,7 @@ StructInfo InferStructInfoScatter(const Call& call, const BlockBuilder& ctx) {
   }
 
   Array<PrimExpr> output_shape = input_shape.value();
-  output_shape.Set(attrs->tensor_dim, div(output_shape[0], num_workers));
+  output_shape.Set(attrs->tensor_dim, div(output_shape[attrs->tensor_dim], num_workers));
   if (input_sinfo->vdevice.defined()) {
     return TensorStructInfo(ShapeExpr(output_shape), output_dtype, input_sinfo->vdevice.value());
   }

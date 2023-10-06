@@ -31,6 +31,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include "../../../tir/schedule/transform.h"
 #include "../../op/ccl/ccl.h"
+#include "../../op/tensor/manipulate.h"
 #include "utils.h"
 
 namespace tvm{
@@ -74,7 +75,7 @@ private:
     return ShapeExpr(new_tensor_shape_value);
   }
 
-  TensorStructInfo ShardSinfo(DTensorStructInfo orig_sinfo){
+  TensorStructInfo ShardDTensorSinfo(DTensorStructInfo orig_sinfo){
     TensorStructInfo tensor_sinfo = orig_sinfo->tensor_sinfo;
     ICHECK(tensor_sinfo->shape);
     const auto* orig_shape = tensor_sinfo->shape.as<ShapeExprNode>();
@@ -83,20 +84,36 @@ private:
     return TensorStructInfo(new_tensor_sinfo);
   }
 
-  Expr ShardInputParamTensorAndConstant(Expr input){
-    const auto* sinfo = GetStructInfoAs<DTensorStructInfoNode>(input);
-    if(!sinfo){
-      return input;
+  StructInfo ShardSinfo(StructInfo orig_sinfo){
+    if(const auto* dtensor_sinfo = orig_sinfo.as<DTensorStructInfoNode>()){
+      return ShardDTensorSinfo(GetRef<DTensorStructInfo>(dtensor_sinfo));
+    } else if(const auto* tuple_sinfo = orig_sinfo.as<TupleStructInfoNode>()){
+      Array<StructInfo> new_fields;
+      for(const auto& field_sinfo: tuple_sinfo->fields){
+        if(const auto* dtensor_sinfo = field_sinfo.as<DTensorStructInfoNode>()){
+          new_fields.push_back(ShardDTensorSinfo(GetRef<DTensorStructInfo>(dtensor_sinfo)));
+        } else {
+          new_fields.push_back(field_sinfo);
+        }
+      }
+      return TupleStructInfo(new_fields);
+    } else{
+      return orig_sinfo;
     }
-    TensorStructInfo new_tensor_sinfo = ShardSinfo(GetRef<DTensorStructInfo>(sinfo));
+  }
+
+  Expr ShardInputParamTensorAndConstant(Expr input){
+    ICHECK(input->struct_info_);
+    StructInfo old_sinfo = GetStructInfo(input);
+    StructInfo new_sinfo = ShardSinfo(old_sinfo);
     if (const auto* var = input.as<VarNode>()) {
-      Var new_param(var->name_hint(), new_tensor_sinfo);
+      Var new_param(var->name_hint(), new_sinfo);
       return new_param;
     } else if (const auto* constant = input.as<ConstantNode>()) {
-      for(const auto& spec: sinfo->placement->dim_specs){
+      for(const auto& spec: Downcast<DTensorStructInfo>(old_sinfo)->placement->dim_specs){
         ICHECK(spec->kind == PlacementSpecKind::kReplica);
       }
-      Constant new_constant(constant->data, new_tensor_sinfo);
+      Constant new_constant(constant->data, new_sinfo);
       return new_constant;
     } else {
       LOG(FATAL) << "Cannot shard tensor which is not Var or Constant: " << input;
@@ -104,34 +121,43 @@ private:
     }
   }
 
-  void InputPreprocessing(Function func) {
-    Optional<Integer> num_inputs = func->GetAttr<Integer>("num_input");
-    if(!num_inputs.defined()){
-      return;
-    }
-    for (int i = 0; i < func->params.size(); i++) {
-      auto sinfo = GetStructInfoAs<DTensorStructInfoNode>(func->params[i]);
-      // ICHECK()
-      Var old_input = param_tensor_remap_.at(func->params[i]);
-      input_preprocessing_.Set(broadcast_from_worker0(old_input), func->params[i]);
+  void InputPreprocessing() {
+    for (int i = 0; i < static_cast<int>(func_->params.size()); i++) {
+      Var param = func_->params[i];
+      if(const auto* dtensor_sinfo = GetStructInfoAs<DTensorStructInfoNode>(param)){
+        //FIXME: this is a hack that only works for 1d device mesh
+        ICHECK(dtensor_sinfo->device_mesh->shape.size() == 1);
+        PlacementSpec sharding_spec = dtensor_sinfo->placement->dim_specs[0];
+        if(sharding_spec->kind == PlacementSpecKind::kReplica){
+          LOG(INFO) << "emit broadcast";
+          Var new_var = builder_->Emit(broadcast_from_worker0(new_params_[i]));
+          var_remap_[param->vid] = new_var;
+        } else if(sharding_spec->kind == PlacementSpecKind::kSharding){
+          LOG(INFO) << "emit scatter";
+          Var scatter_var = builder_->Emit(scatter_from_worker0(new_params_[i], dtensor_sinfo->device_mesh->shape[0], sharding_spec->axis));
+          var_remap_[param->vid] = scatter_var;
+        } else {
+          LOG(FATAL) << "Unsupported placement spec";
+        }
+      } else if(const auto* tuple_sinfo = GetStructInfoAs<TupleStructInfoNode>(param)){
+        LOG(FATAL) << "tuple input not yet supported";
+      }
     }
   }
 
   Function RewriteFunction(Function func){
-    input_tensor_remap_.clear();
-    param_tensor_remap_.clear();
-    input_preprocessing_.clear();
     Array<Var> new_params;
     for (const Var& var : func->params) {
       if (GetStructInfoAs<DTensorStructInfoNode>(var)) {
         Var new_param = Downcast<Var>(ShardInputParamTensorAndConstant(var));
-        param_tensor_remap_.Set(var, new_param);
+        var_remap_[var->vid] = new_param;
         new_params.push_back(new_param);
       } else {
         new_params.push_back(var);
       }
     }
-    InputPreprocessing(func);
+    func_ = func;
+    new_params_ = new_params;
     auto new_body = VisitWithNewScope(func->body, new_params);
     Function new_func(new_params, new_body, NullOpt, func->is_pure, func->attrs);
     return new_func;
@@ -139,10 +165,7 @@ private:
 
   BindingBlock VisitBindingBlock_(const BindingBlockNode* block) {
     builder_->BeginBindingBlock();
-    for(const auto& pr: input_preprocessing_){
-      Var new_var = builder_->Emit(pr.first, "broadcast");
-      input_tensor_remap_.Set(pr.second, new_var);
-    }
+    InputPreprocessing();
     for (Binding binding : block->bindings) {
       this->VisitBinding(binding);
     }
@@ -151,26 +174,11 @@ private:
 
   BindingBlock VisitBindingBlock_(const DataflowBlockNode* block) {
     builder_->BeginDataflowBlock();
-    for(const auto& pr: input_preprocessing_){
-      Var new_var = builder_->Emit(pr.first, "broadcast");
-      input_tensor_remap_.Set(pr.second, new_var);
-    }
+    InputPreprocessing();
     for (auto binding : block->bindings) {
       this->VisitBinding(binding);
     }
     return builder_->EndBlock();
-  }
-
-  Expr VisitExpr_(const VarNode* var) final {
-    auto it = input_tensor_remap_.find(GetRef<Var>(var));
-    if (it != input_tensor_remap_.end()) {
-      return (*it).second;
-    }
-    it = param_tensor_remap_.find(GetRef<Var>(var));
-    if (it != param_tensor_remap_.end()) {
-      return (*it).second;
-    }
-    return ExprMutator::VisitExpr_(var);
   }
 
   Call HandleSpecialCaseinDTensorLowering(const CallNode* call, Var binding_var){
@@ -180,13 +188,14 @@ private:
     if (call->op.same_as(reshape_op)) {
       ICHECK(call->args[1].as<ShapeExprNode>());
       const auto* out_sinfo = GetStructInfoAs<DTensorStructInfoNode>(binding_var);
+      ICHECK(out_sinfo);
       auto new_call_node = make_object<CallNode>(*call);
       new_call_node->args.Set(1, ShardShape(Downcast<ShapeExpr>(call->args[1]), out_sinfo->device_mesh, out_sinfo->placement));
       return Call(new_call_node);
     } else if(call->op.same_as(call_tir_local_view_op)){
       auto new_call_node = make_object<CallNode>(*call);
       new_call_node->op = call_tir_op;
-      new_call_node->sinfo_args = {ShardSinfo(GetRef<DTensorStructInfo>(GetStructInfoAs<DTensorStructInfoNode>(binding_var)))};
+      new_call_node->sinfo_args = {ShardSinfo(GetStructInfo(binding_var))};
       return Call(new_call_node);
     } else if(call->op.same_as(call_tir_op)){
       LOG(FATAL)<<"call_tir should be lowered to call_tir_local_view before lowering to relax";
@@ -195,23 +204,17 @@ private:
   }  
 
   void VisitBinding_(const VarBindingNode* binding, const CallNode* val){
-    const auto* sinfo = GetStructInfoAs<DTensorStructInfoNode>(binding->var);
-    if (!sinfo) {
-      ExprMutator::VisitBinding_(binding, val);
-      return;
-    }
     Call new_call = Downcast<Call>(this->VisitExpr(HandleSpecialCaseinDTensorLowering(val, binding->var)));
     ReEmitBinding(binding, builder_->Normalize(new_call));
   }
 
-  Map<Var, Var> param_tensor_remap_;
-  Map<Expr, Var> input_preprocessing_;
+  Function func_;
+  Array<Var> new_params_;
   //todo: broadcast every "R" input
   //todo: for every "S" input, insert shard and scatter directly in the beginning
   //todo: postpone broadcast
   //      if the operands are "R" on the device mesh dim of the broadcast, then broadcast be moved across this operator
   //      broadcast can be fused with local scatter(slice) and become scatter_from_worker0
-  Map<Var, Var> input_tensor_remap_;
 };
 
 namespace transform {

@@ -335,8 +335,8 @@ class AxisGroupGraph {
    *              kSimbling means other cases
    */
   void JoinAxis(Axis axis1, Axis axis2, EdgeType type) {
-    LOG(INFO) << "Join axis: (" << GetRef<Expr>(axis1.tensor) << ", " << axis1.dim << ", " << axis1.tuple_index << ") and ("
-              << GetRef<Expr>(axis2.tensor) << ", " << axis2.dim << ", " << axis2.tuple_index << ")";
+    // LOG(INFO) << "Join axis: (" << GetRef<Expr>(axis1.tensor) << ", " << axis1.dim << ", " << axis1.tuple_index << ") and ("
+    //           << GetRef<Expr>(axis2.tensor) << ", " << axis2.dim << ", " << axis2.tuple_index << ")";
     AddEdge(axis1, axis2, type);
     AddEdge(axis2, axis1, ReverseEdgeType(type));
   }
@@ -369,7 +369,7 @@ class AxisGroupGraph {
    * \param spec The spec to stop propagation
    */
   void AddPropagationCutPoint(Axis axis, AxisShardingSpec spec) {
-    LOG(INFO)<<"add cutpoint at "<< GetRef<Expr>(axis.tensor) << " " << axis.dim << " " << axis.tuple_index;
+    // LOG(INFO)<<"add cutpoint at "<< GetRef<Expr>(axis.tensor) << " " << axis.dim << " " << axis.tuple_index;
     cutpoint_axis_sharding_spec_[axis] = spec;
   }
 
@@ -429,8 +429,8 @@ class AxisGroupGraph {
           it++;
         }
       }
-      LOG(INFO) << "axis: (" << GetRef<Expr>(axis.tensor) << ", " << axis.dim << ", " << axis.tuple_index << ") has "
-                << (*specs.begin()).first.second << " placement";
+      // LOG(INFO) << "axis: (" << GetRef<Expr>(axis.tensor) << ", " << axis.dim << ", " << axis.tuple_index << ") has "
+      //           << (*specs.begin()).first.second << " placement";
       ICHECK(specs.size() == 1) << "multiple possible sharding for axis: ("
                                 << GetRef<Expr>(axis.tensor) << ", " << axis.dim << ")";
     }

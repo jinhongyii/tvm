@@ -150,7 +150,6 @@ class DistributedBufferCompactor: StmtExprMutator {
   static std::tuple<PrimFunc, std::string> DistBufferCompact(const std::vector<ShardingSpec>& sharding_specs, PrimFunc prim_func){
 
     prim_func = RenewDefs(prim_func);
-    LOG(INFO) << prim_func;
     DistributedBufferCompactor compactor(sharding_specs, prim_func);
     Map<Var, Buffer> new_func_buffer_map;
     Map<Buffer, Buffer> replace_buffer_map;
