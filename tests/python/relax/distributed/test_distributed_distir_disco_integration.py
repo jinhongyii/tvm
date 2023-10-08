@@ -275,7 +275,6 @@ def test_attention(session_kind, ccl):  # pylint: disable=too-many-locals,too-ma
         sharded_mod = relax.distributed.transform.LowerGlobalViewToLocalView()(sharded_mod)
         sharded_mod = relax.distributed.transform.LowerDistIR()(sharded_mod)
         sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
-        sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
         sharded_mod = relax.transform.LiftTransformParams()(sharded_mod)
         relax_build(sharded_mod, target).export_library(path)
 
@@ -492,7 +491,6 @@ def test_attention_combine_qkv(session_kind, ccl):  # pylint: disable=too-many-l
         sharded_mod = relax.distributed.transform.LowerGlobalViewToLocalView()(sharded_mod)
         sharded_mod = relax.distributed.transform.LegalizeRedistribute()(sharded_mod)
         sharded_mod = relax.distributed.transform.LowerDistIR()(sharded_mod)
-        sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
         sharded_mod = relax.transform.LegalizeOps()(sharded_mod)
         sharded_mod = relax.transform.LiftTransformParams()(sharded_mod)
         sharded_mod = relax.transform.BundleModelParams()(sharded_mod)

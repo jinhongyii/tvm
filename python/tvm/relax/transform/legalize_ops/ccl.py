@@ -16,13 +16,12 @@
 # under the License.
 # pylint: disable=invalid-name
 """Default legalization function for ccl operators."""
-from tvm import tir, arith
+from tvm import tir, arith, topi
 from ...block_builder import BlockBuilder
 from ...expr import Call, Expr, ShapeExpr
 from ...op import call_dps_packed
 from ...struct_info import TensorStructInfo, ShapeStructInfo
 from .common import register_legalize
-from tvm.relax.op import reshape, permute_dims
 
 
 @register_legalize("relax.ccl.allreduce")
@@ -80,6 +79,7 @@ def _broadcast_from_worker0(_bb: BlockBuilder, call: Call) -> Expr:
         out_sinfo=call.args[0].struct_info,
     )
 
+
 def transpose_for_ccl(_bb: BlockBuilder, expr: Expr, sharding_dim: int, num_workers: int):
     assert isinstance(
         expr.struct_info, TensorStructInfo
@@ -99,14 +99,21 @@ def transpose_for_ccl(_bb: BlockBuilder, expr: Expr, sharding_dim: int, num_work
             new_shape.append(tir.div(shape_value, num_workers))
         else:
             new_shape.append(shape_value)
-    reshape_var = _bb.emit(reshape(expr, new_shape))
-    permute_order = [sharding_dim]+list(range(sharding_dim))+list(range(sharding_dim+1, len(new_shape)))
-    transpose_var = _bb.emit(permute_dims(reshape_var, permute_order))
+    reshape_var = _bb.emit_te(topi.reshape, expr, new_shape)
+    if sharding_dim == 0:
+        return reshape_var
+    permute_order = (
+        [sharding_dim] + list(range(sharding_dim)) + list(range(sharding_dim + 1, len(new_shape)))
+    )
+    transpose_var = _bb.emit_te(topi.transpose, reshape_var, permute_order)
     return transpose_var
+
 
 @register_legalize("relax.ccl.scatter_from_worker0")
 def _scatter_from_worker0(_bb: BlockBuilder, call: Call) -> Expr:
-    transpose_var = transpose_for_ccl(_bb, call.args[0], call.attrs.tensor_dim, call.attrs.num_workers)
+    transpose_var = transpose_for_ccl(
+        _bb, call.args[0], call.attrs.tensor_dim, call.attrs.num_workers
+    )
     output_shape = transpose_var.struct_info.shape.struct_info.values
     output_shape = output_shape[1:]
     return call_dps_packed(
@@ -122,7 +129,9 @@ def _scatter_from_worker0(_bb: BlockBuilder, call: Call) -> Expr:
 
 @register_legalize("relax.ccl.scatter_from_local")
 def _scatter_from_local(_bb: BlockBuilder, call: Call) -> Expr:
-    transpose_var = transpose_for_ccl(_bb, call.args[0], call.attrs.tensor_dim, call.attrs.num_workers)
+    transpose_var = transpose_for_ccl(
+        _bb, call.args[0], call.attrs.tensor_dim, call.attrs.num_workers
+    )
     output_shape = transpose_var.struct_info.shape.struct_info.values
     output_shape = output_shape[1:]
     return call_dps_packed(
