@@ -112,30 +112,12 @@ def transpose_for_ccl(_bb: BlockBuilder, expr: Expr, sharding_dim: int, num_work
 @register_legalize("relax.ccl.scatter_from_worker0")
 def _scatter_from_worker0(_bb: BlockBuilder, call: Call) -> Expr:
     transpose_var = transpose_for_ccl(
-        _bb, call.args[0], call.attrs.tensor_dim, call.attrs.num_workers
+        _bb, call.args[0], call.attrs.axis, call.attrs.num_workers
     )
     output_shape = transpose_var.struct_info.shape.struct_info.values
     output_shape = output_shape[1:]
     return call_dps_packed(
         "runtime.disco.scatter_from_worker0",
-        transpose_var,
-        out_sinfo=TensorStructInfo(
-            shape=output_shape,
-            dtype=call.args[0].struct_info.dtype,
-            vdevice=call.args[0].struct_info.vdevice,
-        ),
-    )
-
-
-@register_legalize("relax.ccl.scatter_from_local")
-def _scatter_from_local(_bb: BlockBuilder, call: Call) -> Expr:
-    transpose_var = transpose_for_ccl(
-        _bb, call.args[0], call.attrs.tensor_dim, call.attrs.num_workers
-    )
-    output_shape = transpose_var.struct_info.shape.struct_info.values
-    output_shape = output_shape[1:]
-    return call_dps_packed(
-        "runtime.disco.scatter_from_local",
         transpose_var,
         out_sinfo=TensorStructInfo(
             shape=output_shape,

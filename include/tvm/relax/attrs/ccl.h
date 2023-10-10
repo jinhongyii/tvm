@@ -43,17 +43,17 @@ struct AllReduceAttrs : public tvm::AttrsNode<AllReduceAttrs> {
 /*! \brief Attributes used in scatter operators */
 struct ScatterAttrs : public tvm::AttrsNode<ScatterAttrs> {
   int num_workers;
-  int tensor_dim;
+  int axis;
 
   TVM_DECLARE_ATTRS(ScatterAttrs, "relax.attrs.ScatterAttrs") {
     TVM_ATTR_FIELD(num_workers)
         .describe(
             "The number of workers, also the number of parts the given buffer should be chunked "
             "into.");
-    TVM_ATTR_FIELD(tensor_dim)
+    TVM_ATTR_FIELD(axis)
         .describe(
-            "The dimension of the tensor to be scattered. The tensor will be chunked along "
-            "tensor_dim.");
+            "The axis of the tensor to be scattered. The tensor will be chunked along "
+            "this axis.");
   }
 };  // struct ScatterAttrs
 

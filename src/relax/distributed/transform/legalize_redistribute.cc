@@ -30,6 +30,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include "../../../tir/schedule/transform.h"
 #include "../../op/ccl/ccl.h"
+#include "../../op/distributed/distributed.h"
 #include "utils.h"
 
 namespace tvm{
@@ -96,7 +97,7 @@ private:
       } else if (input_spec->kind == PlacementSpecKind::kReplica &&
                  output_spec->kind == PlacementSpecKind::kSharding) {
         // "R" -> "S[x]"
-        return scatter_from_local(call->args[0], attrs->device_mesh->shape[0], output_spec->axis);
+        return redistribute_replica_to_shard(call->args[0], attrs->device_mesh->shape[0], output_spec->axis);
       } else {
         LOG(FATAL) << "Unsupported redistribute op";
       }
