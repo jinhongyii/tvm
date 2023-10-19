@@ -342,7 +342,7 @@ class DistributedIRBuilder : public ExprMutator {
     auto mod = builder_->GetContextIRModule();
     for (const auto& [gv, base_func] : mod->functions) {
       const auto* func_ = base_func.as<FunctionNode>();
-      if (func_ == nullptr) {
+      if (func_ == nullptr || !IsShardingAnnotatedFunc(GetRef<Function>(func_))) {
         continue;
       }
       Function func = RewriteFunction(GetRef<Function>(func_), mod);
@@ -358,7 +358,7 @@ class DistributedIRBuilder : public ExprMutator {
     int ndim = sinfo->ndim;
     DeviceMesh device_mesh =
         std::get<0>(axis_group_graph_.GetAxisShardingSpec({expr.get(), -1, tuple_idx})).first;
-    ICHECK(device_mesh.defined()) << expr << " is not assigned device mesh";
+    ICHECK(device_mesh.defined()) << expr << "["<<tuple_idx<<"] is not assigned device mesh";
     Array<PlacementSpec> placement_specs(
         std::vector<PlacementSpec>(device_mesh->shape.size(), PlacementSpec::Replica()));
     for (int i = 0; i < ndim; i++) {
@@ -446,9 +446,12 @@ class DistributedIRBuilder : public ExprMutator {
 
     ObjectPtr<CallNode> n = make_object<CallNode>(*new_call.get());
     if (new_call->op.same_as(call_tir_op)) {
-      n->args.Set(1, Tuple(args));
-      n->sinfo_args = {InferShardingSpec(
-          Call(n), this->builder_, new_call->sinfo_args[0], f)};
+      // do not infer output sinfo when arg size is 0
+      if(!args.empty()){
+        n->args.Set(1, Tuple(args));
+        n->sinfo_args = {InferShardingSpec(
+            Call(n), this->builder_, new_call->sinfo_args[0], f)};
+      }
     } else {
       n->args = args;
     }
@@ -477,6 +480,43 @@ class DistributedIRBuilder : public ExprMutator {
     return redistribute(expr, device_mesh, placement);
   }
 
+  Call RewriteOutSinfo(Call call, DeviceMesh device_mesh, Array<Placement> placements){
+    // in cases when infer fails (like arg size is 0), we use propagated sinfo for output
+    Call new_call = call;
+    static Op call_tir_op = Op::Get("relax.call_tir");
+    if (const auto* extern_func = call->op.as<ExternFuncNode>()) {
+      if (extern_func->global_symbol == "vm.builtin.distributed.attention_kv_cache_view") {
+        ObjectPtr<CallNode> new_call_node = make_object<CallNode>(*call.get());
+        StructInfo new_dtensor_sinfo =
+            DTensorStructInfo(Downcast<TensorStructInfo>(call->sinfo_args[0]), device_mesh,
+                              placements[0]);
+        new_call_node->sinfo_args = {new_dtensor_sinfo};
+        new_call = Call(new_call_node);
+        new_call->struct_info_ = new_dtensor_sinfo;
+      }
+    } else if (call->op.same_as(call_tir_op)){
+      ICHECK(call->sinfo_args.size() == 1);
+      if (!SinfoCompatibleWithDistIR(call->sinfo_args)) {
+        ObjectPtr<CallNode> new_call_node = make_object<CallNode>(*call.get());
+        if(placements.size()==1){
+          new_call_node->sinfo_args = {DTensorStructInfo(Downcast<TensorStructInfo>(call->sinfo_args[0]), device_mesh,
+                              placements[0])};
+        } else {
+          const auto* tuple_sinfo = call->sinfo_args[0].as<TupleStructInfoNode>();
+          ICHECK(placements.size() == tuple_sinfo->fields.size());
+          Array<StructInfo> new_tuple_sinfo_fields;
+          for (int i = 0; i < static_cast<int>(placements.size()); i++){
+            new_tuple_sinfo_fields.push_back(DTensorStructInfo(Downcast<TensorStructInfo>(tuple_sinfo->fields[i]), device_mesh,
+                              placements[i]));
+          }
+          new_call_node->sinfo_args = {TupleStructInfo(new_tuple_sinfo_fields)};
+        }
+        new_call = Call(new_call_node);
+        new_call->struct_info_ = new_call_node->sinfo_args[0];
+      }
+    }
+    return new_call;
+  }
 
   void VisitBinding_(const VarBindingNode* binding, const CallNode* val) {
     Array<TensorStructInfo> orig_output_tensor_sinfos;
@@ -490,11 +530,11 @@ class DistributedIRBuilder : public ExprMutator {
       ExprMutator::VisitBinding_(binding, val);
       return;
     }
-
     // get annotated sinfo from axis group graph
     DeviceMesh device_mesh =
         std::get<0>(axis_group_graph_.GetAxisShardingSpec({binding->var.get(), -1})).first;
-    Array<Placement> placements; // every tuple element has a placement
+    ICHECK(device_mesh.defined());
+    Array<Placement> placements;  // every tuple element has a placement
     for (int idx = 0;idx<static_cast<int>(orig_output_tensor_sinfos.size());idx++){
       Array<PlacementSpec> placement_specs(
           std::vector<PlacementSpec>(device_mesh->shape.size(), PlacementSpec::Replica()));
@@ -511,18 +551,8 @@ class DistributedIRBuilder : public ExprMutator {
     }
     // get inferred sinfo from struct info deduction
     Call new_call = Downcast<Call>(this->VisitExpr(binding->value));
-    if (const auto* extern_func = new_call->op.as<ExternFuncNode>()) {
-      if (extern_func->global_symbol == "vm.builtin.distributed.attention_kv_cache_view") {
-        ObjectPtr<CallNode> new_call_node = make_object<CallNode>(*new_call.get());
-        StructInfo new_dtensor_sinfo =
-            DTensorStructInfo(Downcast<TensorStructInfo>(new_call->sinfo_args[0]), device_mesh,
-                              placements[0]);
-        new_call_node->sinfo_args = {new_dtensor_sinfo};
-        new_call = Call(new_call_node);
-        new_call->struct_info_ = new_dtensor_sinfo;
-      }
-    }
-    new_call = Downcast<Call>(builder_->Normalize(new_call));
+    new_call =
+        Downcast<Call>(builder_->Normalize(RewriteOutSinfo(new_call, device_mesh, placements)));
 
     if(const auto* inferred_dtensor_sinfo = new_call->struct_info_.as<DTensorStructInfoNode>()){
       Expr new_value = RemoveAnnotateSharding(new_call);

@@ -442,8 +442,8 @@ def raise_last_ffi_error():
     if backtrace:
         frames = re.split(r"\n\W+\d+:\W+", py_str(backtrace))
         frames = frames[1:]  # Skip "Stack trace: "
-
         for frame in frames:
+            print(frame)
             if " at " in frame:
                 func_name, frame = frame.split(" at ", 1)
                 filename, lineno = frame.rsplit(":", 1)

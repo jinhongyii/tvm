@@ -1162,5 +1162,3 @@ def test_decoder_layer_dynamic_shape():
 
 if __name__ == "__main__":
     tvm.testing.main()
-    # test_mlp_with_tuple()
-    # test_decoder_layer_tir()

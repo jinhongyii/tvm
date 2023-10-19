@@ -362,7 +362,7 @@ public:
     auto mod = builder_->GetContextIRModule();
     for (const auto& [gv, base_func] : mod->functions) {
       const auto* func_ = base_func.as<FunctionNode>();
-      if (func_ == nullptr) {
+      if (func_ == nullptr || !IsDistIRFunc(GetRef<Function>(func_))) {
         continue;
       }
       Expr new_func_body = this->VisitExpr(func_->body);

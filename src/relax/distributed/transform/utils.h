@@ -23,7 +23,8 @@
 #include <tvm/ir/module.h>
 #include <tvm/ir/function.h>
 #include <tvm/relax/analysis.h>
-
+#include <tvm/relax/expr_functor.h>
+#include <tvm/relax/distributed/struct_info.h>
 namespace tvm{
 namespace relax{
 namespace distributed{
@@ -42,6 +43,11 @@ inline Optional<tir::PrimFunc> MatchPrimFunc(const IRModule& mod_, const Expr& o
   return NullOpt;
 }
 
+bool SinfoCompatibleWithDistIR(Array<StructInfo> sinfos);
+
+bool IsDistIRFunc(Function func);
+
+bool IsShardingAnnotatedFunc(Function func);
 
 } // namespace distributed
 } // namespace relax

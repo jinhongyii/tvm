@@ -53,9 +53,10 @@ private:
     auto mod = builder_->GetContextIRModule();
     for (const auto& [gv, base_func] : mod->functions) {
       const auto* func_ = base_func.as<FunctionNode>();
-      if (func_ == nullptr) {
+      if (func_ == nullptr || !IsDistIRFunc(GetRef<Function>(func_))) {
         continue;
       }
+      LOG(INFO) << gv->name_hint;
       Function func = RewriteFunction(GetRef<Function>(func_));
       builder_->UpdateFunction(gv, func);
     }
@@ -130,24 +131,40 @@ private:
     }
   }
 
+  void EmitBroadcastOrScatter(Expr old_expr, Expr new_expr, DTensorStructInfo dtensor_sinfo){
+     //FIXME: this is a hack that only works for 1d device mesh
+    ICHECK(dtensor_sinfo->device_mesh->shape.size() == 1);
+    PlacementSpec sharding_spec = dtensor_sinfo->placement->dim_specs[0];
+    if(sharding_spec->kind == PlacementSpecKind::kReplica){
+      Var new_var = builder_->Emit(broadcast_from_worker0(new_expr));
+      if(const auto* var = old_expr.as<VarNode>()){
+        var_remap_[var->vid] = new_var;
+      } else{
+        tuple_getitem_remap_[Downcast<TupleGetItem>(old_expr)] = new_var;
+      }
+    } else if(sharding_spec->kind == PlacementSpecKind::kSharding){
+      Var scatter_var = builder_->Emit(scatter_from_worker0(new_expr, dtensor_sinfo->device_mesh->shape[0], sharding_spec->axis));
+      if(const auto* var = old_expr.as<VarNode>()){
+        var_remap_[var->vid] = scatter_var;
+      } else{
+        tuple_getitem_remap_[Downcast<TupleGetItem>(old_expr)] = scatter_var;
+      }
+    } else {
+      LOG(FATAL) << "Unsupported placement spec";
+    }
+  }
+
   void InputPreprocessing() {
     for (int i = 0; i < static_cast<int>(func_->params.size()); i++) {
       Var param = func_->params[i];
       if(const auto* dtensor_sinfo = GetStructInfoAs<DTensorStructInfoNode>(param)){
-        //FIXME: this is a hack that only works for 1d device mesh
-        ICHECK(dtensor_sinfo->device_mesh->shape.size() == 1);
-        PlacementSpec sharding_spec = dtensor_sinfo->placement->dim_specs[0];
-        if(sharding_spec->kind == PlacementSpecKind::kReplica){
-          Var new_var = builder_->Emit(broadcast_from_worker0(new_params_[i]));
-          var_remap_[param->vid] = new_var;
-        } else if(sharding_spec->kind == PlacementSpecKind::kSharding){
-          Var scatter_var = builder_->Emit(scatter_from_worker0(new_params_[i], dtensor_sinfo->device_mesh->shape[0], sharding_spec->axis));
-          var_remap_[param->vid] = scatter_var;
-        } else {
-          LOG(FATAL) << "Unsupported placement spec";
-        }
+        EmitBroadcastOrScatter(param, new_params_[i], GetRef<DTensorStructInfo>(dtensor_sinfo));
       } else if(const auto* tuple_sinfo = GetStructInfoAs<TupleStructInfoNode>(param)){
-        LOG(FATAL) << "tuple input not yet supported";
+        for (int j = 0; j < static_cast<int>(tuple_sinfo->fields.size()); j++){
+          if(const auto* dtensor_sinfo = tuple_sinfo->fields[j].as<DTensorStructInfoNode>()){
+            EmitBroadcastOrScatter(TupleGetItem(param, j), TupleGetItem(new_params_[i], j), GetRef<DTensorStructInfo>(dtensor_sinfo));
+          }
+        } 
       }
     }
   }
@@ -155,19 +172,23 @@ private:
   Function RewriteFunction(Function func){
     Array<Var> new_params;
     for (const Var& var : func->params) {
-      if (GetStructInfoAs<DTensorStructInfoNode>(var)) {
-        Var new_param = Downcast<Var>(ShardInputParamTensorAndConstant(var));
-        var_remap_[var->vid] = new_param;
-        new_params.push_back(new_param);
-      } else {
-        new_params.push_back(var);
-      }
+      Var new_param = Downcast<Var>(ShardInputParamTensorAndConstant(var));
+      var_remap_[var->vid] = new_param;
+      new_params.push_back(new_param);
     }
     func_ = func;
     new_params_ = new_params;
     auto new_body = VisitWithNewScope(func->body, new_params);
     Function new_func(new_params, new_body, NullOpt, func->is_pure, func->attrs);
     return new_func;
+  }
+
+  void VisitBinding_(const VarBindingNode* binding, const TupleGetItemNode* val) {
+    if (tuple_getitem_remap_.count(GetRef<TupleGetItem>(val))) {
+      var_remap_[binding->var->vid] = tuple_getitem_remap_[GetRef<TupleGetItem>(val)];
+    } else {
+      ExprMutator::VisitBinding_(binding, val);
+    }
   }
 
   BindingBlock VisitBindingBlock_(const BindingBlockNode* block) {
@@ -199,13 +220,27 @@ private:
       auto new_call_node = make_object<CallNode>(*call);
       new_call_node->args.Set(1, ShardShape(Downcast<ShapeExpr>(call->args[1]), out_sinfo->device_mesh, out_sinfo->placement));
       return Call(new_call_node);
-    } else if(call->op.same_as(call_tir_local_view_op)){
+    } else if (call->op.same_as(call_tir_local_view_op)) {
       auto new_call_node = make_object<CallNode>(*call);
       new_call_node->op = call_tir_op;
       new_call_node->sinfo_args = {ConvertSinfo(GetStructInfo(binding_var), true)};
       return Call(new_call_node);
-    } else if(call->op.same_as(call_tir_op)){
+    } else if (call->op.same_as(call_tir_op)) {
       LOG(FATAL)<<"call_tir should be lowered to call_tir_local_view before lowering to relax";
+    } else if (const auto* extern_func = call->op.as<ExternFuncNode>()){
+      auto new_call_node = make_object<CallNode>(*call);  
+      if(extern_func->global_symbol == "vm.builtin.distributed.attention_kv_cache_append"){
+        new_call_node->op = ExternFunc("vm.builtin.attention_kv_cache_append");
+      } else if (extern_func->global_symbol == "vm.builtin.distributed.attention_kv_cache_view"){
+        new_call_node->op = ExternFunc("vm.builtin.attention_kv_cache_view");
+        auto orig_shape = Downcast<ShapeExpr>(call->args[1]);
+        const auto* out_sinfo = GetStructInfoAs<DTensorStructInfoNode>(binding_var);
+        ICHECK(out_sinfo);
+        ShapeExpr new_shape = ShardShape(orig_shape, out_sinfo->device_mesh, out_sinfo->placement);
+        new_call_node->args.Set(1, new_shape);
+        new_call_node->sinfo_args = {TensorStructInfo(new_shape, out_sinfo->tensor_sinfo->dtype)};
+      }
+      return Call(new_call_node);
     }
     return GetRef<Call>(call);
   }  
@@ -217,6 +252,7 @@ private:
 
   Function func_;
   Array<Var> new_params_;
+  std::unordered_map<TupleGetItem, Var, StructuralHash, StructuralEqual> tuple_getitem_remap_;
   //todo: broadcast every "R" input
   //todo: for every "S" input, insert shard and scatter directly in the beginning
   //todo: postpone broadcast

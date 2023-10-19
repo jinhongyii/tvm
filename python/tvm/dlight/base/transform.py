@@ -61,6 +61,7 @@ class ApplyDefaultSchedule:  # pylint: disable=too-few-public-methods
         updated_functions = {}
         for g_var, func in mod.functions.items():
             if isinstance(func, tir.PrimFunc) and not _is_scheduled(func):
+                print(f"Applying default schedule to {g_var.name_hint}")
                 sch = _apply_rules(func, target, self.rules, tunable=False)
                 if sch is not None:
                     assert len(sch) == 1
