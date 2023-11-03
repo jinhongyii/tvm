@@ -241,8 +241,7 @@ class RemoveUnusedVars : public ExprMutator {
       : RemoveUnusedVars(GetUnusedVars(users, fn_outputs)) {}
 
   void VisitBinding_(const VarBindingNode* binding) override {
-    bool can_remove = unused_vars.count(binding->var) &&
-                      (in_dataflow_block_ || !ContainsImpureCall(binding->value));
+    bool can_remove = unused_vars.count(binding->var) && in_dataflow_block_;
     if (!can_remove) {
       ExprMutator::VisitBinding_(binding);
     }
