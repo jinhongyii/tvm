@@ -84,3 +84,26 @@ def call_tir_local_view(
 
   return _ffi_api.call_tir_local_view(gvar, args, out_sinfo, tir_vars)  # type: ignore
 
+def redistribute_replica_to_shard(input: Expr, num_workers: int, axis: int) -> Expr:
+    """ Slice tensor into several parts along one axis,
+        and each worker takes one part.
+        Assumes input is already broadcasted.
+        This is a specialized version of redistribute op.
+
+    Parameters
+    ----------
+    input : relax.Expr
+      The buffer to be sliced into equal parts.
+
+    num_worker : int
+      The number of workers, i.e. the number of parts the given buffer should be sliced into.
+
+    axis : int
+      The axis of the tensor to be sliced.
+      
+    Returns
+    -------
+    result : relax.Expr
+      Sliced Tensor kept by each device.
+    """
+    return _ffi_api.redistribute_replica_to_shard(input, num_workers, axis)

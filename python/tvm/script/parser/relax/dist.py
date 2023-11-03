@@ -25,7 +25,7 @@ from tvm.tir import PrimExpr
 from tvm.relax.distributed import DeviceMesh, Placement, DTensorStructInfo, device_mesh
 from tvm.script.ir_builder import IRBuilder
 from tvm.script.ir_builder.ir import IRModuleFrame
-from tvm.script.ir_builder.relax.distributed import call_tir, const, annotate_sharding, redistribute, call_tir_local_view
+from tvm.script.ir_builder.relax.distributed import call_tir, const, annotate_sharding, redistribute, call_tir_local_view, redistribute_replica_to_shard
 from .entry import StructInfoProxy, TensorProxy
 
 
