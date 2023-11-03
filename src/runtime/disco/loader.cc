@@ -47,6 +47,9 @@ class ShardLoaderObj : public Object {
                           std::string shard_info, Module mod);
   /*! \brief Load the i-th parameter */
   NDArray Load(int weight_index) const;
+
+  NDArray LoadWithoutShard(int weight_index) const; 
+
   /*! \brief Load all the parameters */
   Array<NDArray> LoadAll() const;
 
@@ -141,6 +144,37 @@ std::string GetSiblingPath(const std::string& path, const std::string& filename)
   LOG(FATAL) << "ValueError: Cannot find the parent directory: " << path;
 }
 
+NDArray ShardLoaderObj::LoadWithoutShard(int weight_index) const {
+  DiscoWorker* worker = DiscoWorker::ThreadLocal();
+  int worker_id = worker->worker_id;
+  int num_shards = worker->num_workers;
+  Device device = worker->default_device;
+  int param_index = param_name_to_index_.at("param_"+std::to_string(weight_index));
+  const ParamInfo& param_info = param_info_.at(param_index);
+  const ParamRecord* param = param_info.param;
+  const FileRecord* file = param_info.file;
+
+  auto load = [this, param, device, file]() {
+    if (file != current_file_) {
+      current_file_ = file;
+      std::string file_name = GetSiblingPath(this->metadata_.path, file->data_path);
+      LoadBinaryFromFile(file_name, &this->current_file_stream_);
+    }
+    return param->Load(
+        device, &this->current_file_stream_,
+        [](NDArray param, const void* data, size_t nbytes) { param.CopyFromBytes(data, nbytes); });
+  };
+
+  if (worker_id == 0) {
+    NDArray w = load();
+    return w;
+  } else {
+    NDArray w = NDArray::Empty(param->shape, param->dtype, device);
+    return w;
+  }
+  
+}
+
 NDArray ShardLoaderObj::Load(int weight_index) const {
   DiscoWorker* worker = DiscoWorker::ThreadLocal();
   int worker_id = worker->worker_id;
@@ -206,6 +240,8 @@ Array<NDArray> ShardLoaderObj::LoadAll() const {
   return shards;
 }
 
+
+
 TVM_REGISTER_GLOBAL("runtime.disco.ShardLoader").set_body_typed(ShardLoaderObj::Create);
 TVM_REGISTER_GLOBAL("runtime.disco.ShardLoaderLoad")
     .set_body_typed([](ObjectRef loader_obj, ShapeTuple weight_index) {
@@ -221,6 +257,14 @@ TVM_REGISTER_GLOBAL("runtime.disco.ShardLoaderLoadAll").set_body_typed([](Object
                            << loader_obj->GetTypeKey();
   return loader->LoadAll();
 });
+
+TVM_REGISTER_GLOBAL("runtime.disco.ShardLoaderLoadWithoutShard")
+    .set_body_typed([](ObjectRef loader_obj, int param_index) {
+      const auto* loader = loader_obj.as<ShardLoaderObj>();
+      CHECK(loader != nullptr) << "TypeError: Expected ShardLoaderObj, but gets: "
+                               << loader_obj->GetTypeKey();
+      return loader->LoadWithoutShard(param_index);
+    });
 
 }  // namespace runtime
 }  // namespace tvm

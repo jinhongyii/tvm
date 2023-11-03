@@ -17,9 +17,15 @@
 # pylint: disable=redefined-builtin
 """Operators for distributed Relax.
 """
+from typing import Union, List, Tuple, Optional
+
 from tvm.relax.distributed.struct_info import DeviceMesh, Placement
+from tvm.ir import PrimExpr
+from tvm.relax.utils import args_converter
+from tvm.relax.distributed import DTensorStructInfo
+from ...expr import Tuple as RxTuple
 from . import _ffi_api
-from ...expr import Expr
+from ...expr import Expr, ShapeExpr, Call, GlobalVar
 
 
 def annotate_sharding(input: Expr, device_mesh: DeviceMesh, placement: Placement) -> Expr:
@@ -59,3 +65,45 @@ def redistribute(input: Expr, device_mesh: DeviceMesh, placement: Placement) -> 
       The tensor after redistribution.
     """
     return _ffi_api.redistribute(input, device_mesh, placement)  # type: ignore
+
+@args_converter.auto
+def call_tir_local_view(
+    gvar: GlobalVar,
+    args: Expr,
+    out_sinfo: DTensorStructInfo,
+    tir_vars: Optional[Union[ShapeExpr, Tuple[PrimExpr], List[PrimExpr]]] = None,
+) -> Call:
+  if isinstance(args, Expr) and not isinstance(args, RxTuple):  # type: ignore
+    args = RxTuple((args,))
+
+  if not isinstance(out_sinfo, list):
+      out_sinfo = [out_sinfo]
+
+  if isinstance(tir_vars, (list, tuple)):
+      tir_vars = ShapeExpr(tir_vars)
+
+  return _ffi_api.call_tir_local_view(gvar, args, out_sinfo, tir_vars)  # type: ignore
+
+def redistribute_replica_to_shard(input: Expr, num_workers: int, axis: int) -> Expr:
+    """ Slice tensor into several parts along one axis,
+        and each worker takes one part.
+        Assumes input is already broadcasted.
+        This is a specialized version of redistribute op.
+
+    Parameters
+    ----------
+    input : relax.Expr
+      The buffer to be sliced into equal parts.
+
+    num_worker : int
+      The number of workers, i.e. the number of parts the given buffer should be sliced into.
+
+    axis : int
+      The axis of the tensor to be sliced.
+      
+    Returns
+    -------
+    result : relax.Expr
+      Sliced Tensor kept by each device.
+    """
+    return _ffi_api.redistribute_replica_to_shard(input, num_workers, axis)

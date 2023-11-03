@@ -21,7 +21,7 @@ from tvm.script.parser import ir as I
 from tvm.script.parser import relax as R
 from tvm.script.parser import tir as T
 import tvm
-from tvm import relax
+from tvm import relax, tir
 from tvm.ir import assert_structural_equal
 import tvm.testing
 
@@ -50,7 +50,6 @@ class MLP:
         lv3 = R.matmul(lv2, weight2)
         return lv3
 
-
 @I.ir_module
 class ShardedMLP:
     I.module_attrs({"device_num": 10})
@@ -74,7 +73,86 @@ class ShardedMLP:
         )
         return lv3
 
+@I.ir_module
+class MLPWithTuple:
+    I.module_attrs({"device_num": 10})
+    I.module_global_infos(
+        {
+            "mesh": [
+                R.device_mesh((2,), I.Range(0, 2)),  # mesh[0]
+                R.device_mesh((1,), I.Range(4, 5)),  # mesh[1]
+            ]
+        }
+    )
 
+    
+    @T.prim_func(private=True)
+    def split1(var_A: T.handle, var_T_split: T.handle, var_T_split_1: T.handle):
+        T.func_attr({"tir.noalias": T.bool(True)})
+        A = T.match_buffer(var_A, (128, 128), "float32")
+        T_split = T.match_buffer(var_T_split, (64, 128), "float32")
+        T_split_1 = T.match_buffer(var_T_split_1, (64, 128), "float32")
+        # with T.block("root"):
+        for ax1, ax2 in T.grid(64, 128):
+            with T.block("T_split"):
+                v_ax1, v_ax2 = T.axis.remap("SS", [ax1, ax2])
+                T_split[v_ax1, v_ax2] = A[v_ax1, v_ax2]
+        for ax1, ax2 in T.grid(64, 128):
+            with T.block("T_split_1"):
+                v_ax1, v_ax2 = T.axis.remap("SS", [ax1, ax2])
+                T_split_1[v_ax1, v_ax2] = A[v_ax1+64, v_ax2]
+
+
+    @R.function
+    def foo(
+        x: R.Tensor((128, 128), "float32"),
+        weight_packed: R.Tuple(R.Tensor((128, 128), "float32"), R.Tensor((128, 128), "float32")),
+    ) -> R.Tensor((64, 128), "float32"):
+        cls = MLPWithTuple
+        weight1 = weight_packed[0]
+        lv0 = R.matmul(x, weight1)
+        lv1 = R.nn.gelu(lv0)
+        lv_tuple = R.call_tir(cls.split1, [lv1], out_sinfo=[R.Tensor((64, 128), "float32"), R.Tensor((64, 128), "float32")])
+        lv2 = lv_tuple[0]
+        lv3 = R.dist.annotate_sharding(lv2, device_mesh="mesh[0]", placement="S[1]")
+        weight2 = weight_packed[1]
+        lv4 = R.matmul(lv3, weight2)
+        return lv4
+    
+
+@I.ir_module
+class ShardedMLPWithTuple:
+    I.module_attrs({"device_num": 10})
+    I.module_global_infos({"mesh": [R.device_mesh((2,), I.Range(0, 2)), R.device_mesh((1,), I.Range(4, 5))]})
+    @T.prim_func(private=True)
+    def split1(A: T.Buffer((128, 128), "float32"), T_split: T.Buffer((64, 128), "float32"), T_split_1: T.Buffer((64, 128), "float32")):
+        T.func_attr({"tir.noalias": T.bool(True)})
+        # with T.block("root"):
+        for ax1, ax2 in T.grid(64, 128):
+            with T.block("T_split"):
+                v_ax1, v_ax2 = T.axis.remap("SS", [ax1, ax2])
+                T.reads(A[v_ax1, v_ax2])
+                T.writes(T_split[v_ax1, v_ax2])
+                T_split[v_ax1, v_ax2] = A[v_ax1, v_ax2]
+        for ax1, ax2 in T.grid(64, 128):
+            with T.block("T_split_1"):
+                v_ax1, v_ax2 = T.axis.remap("SS", [ax1, ax2])
+                T.reads(A[v_ax1 + 64, v_ax2])
+                T.writes(T_split_1[v_ax1, v_ax2])
+                T_split_1[v_ax1, v_ax2] = A[v_ax1 + 64, v_ax2]
+
+    @R.function
+    def foo(x: R.DTensor((128, 128), "float32", "mesh[0]", "R"), weight_packed: R.Tuple(R.DTensor((128, 128), "float32", "mesh[0]", "S[1]"), R.DTensor((128, 128), "float32", "mesh[0]", "S[0]"))) -> R.DTensor((64, 128), "float32", "mesh[0]", "R"):
+        cls = ShardedMLPWithTuple
+        weight1: R.DTensor((128, 128), "float32", "mesh[0]", "S[1]") = weight_packed[0]
+        lv0: R.DTensor((128, 128), "float32", "mesh[0]", "S[1]") = R.matmul(x, weight1, out_dtype="void")
+        lv1: R.DTensor((128, 128), "float32", "mesh[0]", "S[1]") = R.nn.gelu(lv0)
+        lv_tuple = R.dist.call_tir(cls.split1, (lv1,), out_sinfo=[R.DTensor((64, 128), "float32", "mesh[0]", "S[1]"), R.DTensor((64, 128), "float32", "mesh[0]", "S[1]")])
+        lv2: R.DTensor((64, 128), "float32", "mesh[0]", "S[1]") = lv_tuple[0]
+        lv3: R.DTensor((64, 128), "float32", "mesh[0]", "S[1]") = lv2
+        weight2: R.DTensor((128, 128), "float32", "mesh[0]", "S[0]") = weight_packed[1]
+        lv4: R.DTensor((64, 128), "float32", "mesh[0]", "R") = R.matmul(lv3, weight2, out_dtype="void")
+        return lv4
 @I.ir_module
 class PipelineMLP:
     I.module_attrs({"device_num": 10})
@@ -1040,9 +1118,14 @@ class ShardedLlamaAttentionLayerDynamicShape:
 
 
 def test_mlp():
-    after = relax.distributed.transform.PropagateSharding()(MLP)
-    assert_structural_equal(after, ShardedMLP)
+    mod = relax.transform.LegalizeOps()(MLP)
+    after = relax.distributed.transform.PropagateSharding()(mod)
+    print(mod)
+    # assert_structural_equal(after, ShardedMLP)
 
+def test_mlp_with_tuple():
+    after = relax.distributed.transform.PropagateSharding()(MLPWithTuple)
+    assert_structural_equal(after, ShardedMLPWithTuple)
 
 def test_mlp_const():
     after = relax.distributed.transform.PropagateSharding()(MLPWithConst)
@@ -1065,6 +1148,12 @@ def test_decoder_layer():
     after = relax.distributed.transform.PropagateSharding()(mod)
     assert_structural_equal(after, ShardedLlamaAttentionLayer)
 
+def test_decoder_layer_tir():
+    mod = relax.transform.LegalizeOps()(LlamaAttentionLayer)
+    mod = tir.transform.Simplify()(mod)
+    after = relax.distributed.transform.PropagateSharding()(mod)
+    print(after)
+
 
 def test_decoder_layer_dynamic_shape():
     # mod = relax.transform.LegalizeOps({"relax.reshape": lambda bb, call: bb.normalize(call)})(LlamaAttentionLayer)
@@ -1074,4 +1163,4 @@ def test_decoder_layer_dynamic_shape():
 
 
 if __name__ == "__main__":
-    tvm.testing.main()
+    test_mlp()

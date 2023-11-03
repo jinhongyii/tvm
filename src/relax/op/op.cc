@@ -941,7 +941,7 @@ TVM_REGISTER_OP("relax.vm.kill_object")
     .add_argument("obj", "Expr", "The object to be killed.")
     .set_attr<FInferStructInfo>("FInferStructInfo", ReturnVoidStructInfo)
     // deallocation also isn't considered a "visible effect" as far as purity is concerned
-    .set_attr<Bool>("FPurity", Bool(true));
+    .set_attr<Bool>("FPurity", Bool(false));
 
 Expr MakeVMKillObject(Expr obj) {
   static const Op& op = Op::Get("relax.vm.kill_object");
