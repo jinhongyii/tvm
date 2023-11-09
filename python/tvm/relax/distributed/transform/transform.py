@@ -30,3 +30,13 @@ def PropagateSharding() -> tvm.ir.transform.Pass:
         The registered pass
     """
     return _ffi_api.PropagateSharding()  # type: ignore
+
+def LowerGlobalViewToLocalView() -> tvm.ir.transform.Pass:
+    """Lower global view TIR to local view
+
+    Returns
+    -------
+    ret : tvm.transform.Pass
+        The registered pass
+    """
+    return _ffi_api.LowerGlobalViewToLocalView()  # type: ignore
