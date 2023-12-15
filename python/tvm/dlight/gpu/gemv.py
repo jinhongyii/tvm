@@ -24,8 +24,10 @@ from tvm.target import Target
 
 from ..base import (
     BlockInfo,
+    IterInfo,
     ScheduleRule,
-    collect_vars_used_in_access_region,
+    collect_block_iter_vars_used_in_access_region,
+    collect_vars_used_in_prim_expr,
     detect_dominant_read,
     is_broadcast_epilogue,
     normalize_prim_func,
@@ -86,7 +88,10 @@ def is_gemv(sch: tir.Schedule, block_info: BlockInfo) -> Optional[List[tir.Buffe
     conditions.append(len(block_stmt.reads) >= 2)
     conditions.append(len(block_stmt.writes) == 1)
     conditions.append(_get_reduction_expr(block_stmt) is not None)
-    conditions.append(len(collect_vars_used_in_access_region(block_stmt.writes[0].region)) > 0)
+    conditions.append(
+        len(collect_block_iter_vars_used_in_access_region(block_stmt, block_stmt.writes[0].region))
+        > 0
+    )
     if not all(conditions):
         return None
 
@@ -94,7 +99,7 @@ def is_gemv(sch: tir.Schedule, block_info: BlockInfo) -> Optional[List[tir.Buffe
     ret = [
         read.buffer
         for read in block_stmt.reads
-        if len(collect_vars_used_in_access_region(read.region)) < iter_num
+        if len(collect_block_iter_vars_used_in_access_region(block_stmt, read.region)) < iter_num
     ]
     return ret if 0 < len(ret) < len(block_stmt.reads) else None
 
@@ -109,12 +114,19 @@ def normalize(
         detect_dominant_read(block_stmt),
         input_iters={i.var: i.dom for i in block_stmt.iter_vars},
     )
-
-    buffers_use_vars = [collect_vars_used_in_access_region(buf.region) for buf in block_stmt.writes]
+    buffers_use_vars = [
+        collect_block_iter_vars_used_in_access_region(block_stmt, buf.region)
+        for buf in block_stmt.writes
+    ]
     buffers_use_vars.extend(
-        [collect_vars_used_in_access_region(buf.region) for buf in block_stmt.reads]
+        [
+            collect_block_iter_vars_used_in_access_region(block_stmt, buf.region)
+            for buf in block_stmt.reads
+        ]
     )
-    if access.base != 0:
+    if collect_vars_used_in_prim_expr(access.base) & set(
+        iter_var.var for iter_var in block_stmt.iter_vars
+    ):
         return None
     iter_to_info = {i.var: i for i in block_info.iters}
     batch_loops, s_loops, r_loops, c_loops = [], [], [], []
