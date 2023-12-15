@@ -273,5 +273,201 @@ class TestSplitHostDeviceNameCollision(BaseCompare):
         return mod
 
 
+def test_dynamic_launch_thread():
+    """Dynamic T.launch_thread
+
+    A dynamic parameter for `T.launch_thread` must be computable
+    within the parent scope.
+    """
+
+    @I.ir_module
+    class before:
+        I.module_attrs({"runtime": None})
+
+        @T.prim_func
+        def default_function(var_A: T.handle, var_T_add: T.handle, seq_len: T.int32):
+            T.func_attr(
+                {
+                    "target": T.target("cuda"),
+                    "tir.is_entry_func": T.bool(True),
+                    "tir.is_scheduled": 1,
+                    "tir.noalias": T.bool(True),
+                }
+            )
+            A = T.match_buffer(var_A, (seq_len * 8,), "int32")
+            T_add = T.match_buffer(var_T_add, (seq_len * 8,), "int32")
+            cse_var_1: T.int32 = (seq_len + 127) // 128
+            T_expand_dims = T.allocate([seq_len * 8], "int32", "global")
+            output_buf = T.allocate([T.Cast("int64", seq_len) * T.int64(8)], "int32", "global")
+            T_expand_dims_1 = T.Buffer(
+                (
+                    T.min(
+                        seq_len * 8,
+                        T.max(
+                            seq_len * 8,
+                            T.Select(not T.bool(False), seq_len * 8, seq_len * -8),
+                        )
+                        - T.min(0, 1 - T.Select(not T.bool(False), seq_len * 8, seq_len * -8)),
+                    ),
+                ),
+                "int32",
+                data=T_expand_dims,
+            )
+            A_1 = T.Buffer((seq_len * 8,), "int32", data=A.data)
+            with T.attr(T.target("cuda"), "target", 0):
+                blockIdx_x = T.launch_thread("blockIdx.x", cse_var_1)
+                threadIdx_x = T.launch_thread("threadIdx.x", 1024)
+                if blockIdx_x * 1024 + threadIdx_x < seq_len * 8:
+                    T_expand_dims_1[blockIdx_x * 1024 + threadIdx_x] = A_1[
+                        blockIdx_x * 1024 + threadIdx_x
+                    ]
+            output_buf_1 = T.Buffer(
+                (T.Cast("int64", seq_len) * T.int64(8),), "int32", data=output_buf, align=8
+            )
+            if 0 < seq_len:
+                cse_var_3: T.int32 = seq_len * 8
+                cse_var_2: T.float32 = T.Cast("float32", cse_var_3)
+                with T.attr(T.target("cuda"), "target", 0):
+                    threadIdx_x = T.launch_thread("threadIdx.x", 256)
+                    blockIdx_x = T.launch_thread("blockIdx.x", (seq_len + 31) // 32)
+                    blockIdx_y = T.launch_thread("blockIdx.y", 1)
+                    if blockIdx_x * 256 + threadIdx_x < cse_var_3:
+                        output_buf_1[
+                            T.Cast("int64", (blockIdx_x * 256 + threadIdx_x) // cse_var_3)
+                            * T.Cast("int64", seq_len)
+                            * T.int64(8)
+                            + T.Cast("int64", (blockIdx_x * 256 + threadIdx_x) % cse_var_3)
+                        ] = T_expand_dims_1[blockIdx_x * 256 + threadIdx_x]
+                for i in range(T.Cast("int32", T.ceil(T.log2(cse_var_2)))):
+                    cse_var_4: T.int64 = T.Cast("int64", seq_len) * T.int64(8)
+                    T.attr(T.target("cuda"), "target", 0)
+                    threadIdx_x = T.launch_thread("threadIdx.x", 256)
+                    start_1 = T.allocate([1], "int64", "local")
+                    middle_1 = T.allocate([1], "int64", "local")
+                    end_1 = T.allocate([1], "int64", "local")
+                    blockIdx_x = T.launch_thread(
+                        "blockIdx.x", (cse_var_3 - 1) // (T.shift_left(2, i) * 256) + 1
+                    )
+                    blockIdx_y = T.launch_thread("blockIdx.y", 1)
+                    start_1_1 = T.Buffer((1,), "int64", data=start_1, scope="local")
+                    start_1_1[0] = T.Cast("int64", T.shift_left(2, i)) * (
+                        T.Cast("int64", blockIdx_x) * T.int64(256) + T.Cast("int64", threadIdx_x)
+                    )
+                    if start_1_1[0] < cse_var_4:
+                        middle_1_1 = T.Buffer((1,), "int64", data=middle_1, scope="local")
+                        middle_1_1[0] = (
+                            T.Cast("int64", T.shift_left(2, i)) // T.int64(2) + start_1_1[0]
+                        )
+                        end_1_1 = T.Buffer((1,), "int64", data=end_1, scope="local")
+                        end_1_1[0] = T.min(
+                            start_1_1[0] + T.Cast("int64", T.shift_left(2, i)), cse_var_4
+                        )
+                        if middle_1_1[0] < cse_var_4:
+                            output_buf_1[end_1_1[0] - T.int64(1)] = (
+                                output_buf_1[end_1_1[0] - T.int64(1)]
+                                + output_buf_1[middle_1_1[0] - T.int64(1)]
+                            )
+                with T.attr(T.target("cuda"), "target", 0):
+                    blockIdx_x = T.launch_thread("blockIdx.x", 1)
+                    output_buf_1[
+                        (T.Cast("int64", -1 // cse_var_3) + T.int64(1))
+                        * T.Cast("int64", seq_len)
+                        * T.int64(8)
+                        + T.Cast("int64", (cse_var_3 - 1) % cse_var_3)
+                    ] = 0
+                for j in range(T.Cast("int32", T.ceil(T.log2(cse_var_2)))):
+                    cse_var_6: T.int64 = T.Cast("int64", j)
+                    cse_var_5: T.int64 = T.Cast("int64", seq_len) * T.int64(8)
+                    T.attr(T.target("cuda"), "target", 0)
+                    threadIdx_x = T.launch_thread("threadIdx.x", 256)
+                    start_1 = T.allocate([1], "int64", "local")
+                    middle_1 = T.allocate([1], "int64", "local")
+                    end_2 = T.allocate([1], "int64", "local")
+                    end_3 = T.allocate([1], "int32", "local")
+                    blockIdx_x = T.launch_thread(
+                        "blockIdx.x",
+                        T.max(
+                            1,
+                            T.Cast(
+                                "int32",
+                                (
+                                    T.shift_left(
+                                        T.int64(2),
+                                        T.Cast("int64", T.ceil(T.log2(cse_var_2)))
+                                        - cse_var_6
+                                        - T.int64(1),
+                                    )
+                                    * T.int64(256)
+                                    + cse_var_5
+                                    - T.int64(1)
+                                )
+                                // (
+                                    T.shift_left(
+                                        T.int64(2),
+                                        T.Cast("int64", T.ceil(T.log2(cse_var_2)))
+                                        - cse_var_6
+                                        - T.int64(1),
+                                    )
+                                    * T.int64(256)
+                                ),
+                            ),
+                        ),
+                    )
+                    blockIdx_y = T.launch_thread("blockIdx.y", 1)
+                    start_1_1 = T.Buffer((1,), "int64", data=start_1, scope="local")
+                    start_1_1[0] = T.shift_left(
+                        T.int64(2),
+                        T.Cast("int64", T.ceil(T.log2(cse_var_2))) - cse_var_6 - T.int64(1),
+                    ) * (T.Cast("int64", blockIdx_x) * T.int64(256) + T.Cast("int64", threadIdx_x))
+                    if start_1_1[0] < cse_var_5:
+                        middle_1_1 = T.Buffer((1,), "int64", data=middle_1, scope="local")
+                        middle_1_1[0] = (
+                            T.shift_left(
+                                T.int64(2),
+                                T.Cast("int64", T.ceil(T.log2(cse_var_2))) - cse_var_6 - T.int64(1),
+                            )
+                            // T.int64(2)
+                            + start_1_1[0]
+                        )
+                        end_2_1 = T.Buffer((1,), "int64", data=end_2, scope="local")
+                        end_2_1[0] = T.min(
+                            start_1_1[0]
+                            + T.shift_left(
+                                T.int64(2),
+                                T.Cast("int64", T.ceil(T.log2(cse_var_2))) - cse_var_6 - T.int64(1),
+                            ),
+                            cse_var_5,
+                        )
+                        if middle_1_1[0] < cse_var_5:
+                            end_3_1 = T.Buffer((1,), "int32", data=end_3, scope="local")
+                            end_3_1[0] = output_buf_1[middle_1_1[0] - T.int64(1)]
+                            output_buf_1[middle_1_1[0] - T.int64(1)] = output_buf_1[
+                                end_2_1[0] - T.int64(1)
+                            ]
+                            output_buf_1[end_2_1[0] - T.int64(1)] = (
+                                output_buf_1[end_2_1[0] - T.int64(1)] + end_3_1[0]
+                            )
+            T_expand_dims_2 = T.Buffer((seq_len * 8,), "int32", data=T_expand_dims)
+            with T.attr(T.target("cuda"), "target", 0):
+                blockIdx_x = T.launch_thread("blockIdx.x", cse_var_1)
+                threadIdx_x = T.launch_thread("threadIdx.x", 1024)
+                if blockIdx_x * 1024 + threadIdx_x < seq_len * 8:
+                    T_expand_dims_2[blockIdx_x * 1024 + threadIdx_x] = output_buf_1[
+                        T.Cast("int64", blockIdx_x) * T.int64(1024) + T.Cast("int64", threadIdx_x)
+                    ]
+            T.attr(T.target("cuda"), "target", 0)
+            blockIdx_x = T.launch_thread("blockIdx.x", cse_var_1)
+            threadIdx_x = T.launch_thread("threadIdx.x", 1024)
+            if blockIdx_x * 1024 + threadIdx_x < seq_len * 8:
+                T_add_1 = T.Buffer((seq_len * 8,), "int32", data=T_add.data)
+                T_add_1[blockIdx_x * 1024 + threadIdx_x] = (
+                    A_1[blockIdx_x * 1024 + threadIdx_x]
+                    + T_expand_dims_2[blockIdx_x * 1024 + threadIdx_x]
+                )
+
+    after = tvm.tir.transform.SplitHostDevice()(before)
+    tvm.tir.analysis.verify_well_formed(after)
+
+
 if __name__ == "__main__":
     tvm.testing.main()
