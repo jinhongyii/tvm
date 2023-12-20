@@ -868,4 +868,4 @@ def ceil_log2(x):
     if "adreno" in tvm.target.Target.current().device_name:
         return cast(tvm.tir.ceil(tvm.tir.log2(cast(x, "float32"))), x.dtype)
 
-    return cast(tvm.tir.ceil(tvm.tir.log2(cast(x, "float64"))), x.dtype)
+    return cast(tvm.tir.ceil(tvm.tir.log2(cast(x, "float32"))), x.dtype)
