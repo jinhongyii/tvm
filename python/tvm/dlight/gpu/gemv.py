@@ -99,7 +99,8 @@ def is_gemv(sch: tir.Schedule, block_info: BlockInfo) -> Optional[List[tir.Buffe
     ret = [
         read.buffer
         for read in block_stmt.reads
-        if len(collect_block_iter_vars_used_in_access_region(block_stmt, read.region)) < iter_num
+        if len(collect_block_iter_vars_used_in_access_region(block_stmt, read.region)) < iter_num and 
+        len(collect_block_iter_vars_used_in_access_region(block_stmt, read.region)) > 0
     ]
     return ret if 0 < len(ret) < len(block_stmt.reads) else None
 
