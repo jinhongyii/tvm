@@ -223,7 +223,7 @@ def test_decode_gemv_3():
                             for ax1_fused_1 in range(8):
                                 with T.block("matmul"):
                                     vax1_fused_1 = T.axis.reduce(1024, ax0)
-                                    v0 = T.axis.spatial(4096, ax0_0_fused * 8 + ax1_fused_0 * 8 + ax1_fused_1)
+                                    v0 = T.axis.spatial(4096, ax0_0_fused * 8 + ax1_fused_1)
                                     T.reads(C_rf_local[vax1_fused_1, 0, 0, v0])
                                     T.writes(C[0, 0, v0])
                                     with T.init():
@@ -923,4 +923,5 @@ def test_reduction_inner_spatial_choose_perfect_factor():
 
 
 if __name__ == "__main__":
-    tvm.testing.main()
+    # tvm.testing.main()
+    test_decode_gemv_3()

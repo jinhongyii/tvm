@@ -195,11 +195,18 @@ class Reduction(ScheduleRule):
         # Schedule the write back block
         sch.reverse_compute_at(block, bx, preserve_unit_loops=True)
         _, tx, *s = sch.get_loops(block)
-        s = sch.fuse(*s)
-        sch.reorder(s, tx)
+
         if unroll_spatial_factor:
-            s, inner = sch.split(s, factors=[None, unroll_spatial_factor])
-            sch.reorder(s, tx, inner)
+            assert len(s) == len(loop_order)
+            new_order_s = [s[loop_order[i]] for i in range(len(s))]
+            sch.reorder(*new_order_s)
+            new_order_s[s_split_index], c = sch.split(new_order_s[s_split_index], factors=[None, unroll_spatial_factor])
+            sch.reorder(*new_order_s, c)
+            s = sch.fuse(*new_order_s)
+            sch.reorder(s, tx, c)
+        else:
+            s = sch.fuse(*s)
+            sch.reorder(s, tx)
         sch.bind(tx, "threadIdx.x")
         # Schedule epilogue
         if epilogue_info is not None:
