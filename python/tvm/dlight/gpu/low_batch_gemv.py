@@ -94,6 +94,8 @@ def is_gemv(sch: tir.Schedule, block_info: BlockInfo) -> Optional[List[tir.Buffe
     if not all(conditions):
         return None
     const_iter_vars = set(iter_var.var for iter_var in block_stmt.iter_vars if isinstance(iter_var.dom.extent, tir.IntImm))
+    if len(const_iter_vars) == len(block_stmt.iter_vars):
+        return None
     ret = [
         read.buffer
         for read in block_stmt.reads
