@@ -366,6 +366,7 @@ tvm_file_glob(GLOB RUNTIME_SRCS
   src/runtime/vm/*.cc
   src/runtime/memory/*.cc
   src/runtime/disco/*.cc
+  src/runtime/disco/*.cu
   src/runtime/minrpc/*.cc
   src/runtime/relax_vm/*.cc
 )
@@ -453,7 +454,7 @@ endif(USE_PROFILER)
 if(USE_CUDA AND USE_NCCL)
   message(STATUS "Build with NCCL...")
   find_nccl(${USE_NCCL})
-  tvm_file_glob(GLOB RUNTIME_NCCL_SRC src/runtime/disco/nccl/*.cc)
+  tvm_file_glob(GLOB RUNTIME_NCCL_SRC src/runtime/disco/nccl/*.cc src/runtime/disco/cuda_ipc/*.cc src/runtime/disco/cuda_ipc/*.cu)
   set_source_files_properties(src/runtime/disco/nccl/nccl.cc PROPERTIES COMPILE_DEFINITIONS "TVM_NCCL_RCCL_SWITCH=0")
   list(APPEND RUNTIME_SRCS ${RUNTIME_NCCL_SRC})
 endif()
