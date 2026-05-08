@@ -30,7 +30,8 @@
 namespace tvm {
 namespace tirx {
 
-PrimFunc ScriptComplete(PrimFunc func, const ffi::Array<Buffer>& root_allocates);
+PrimFunc ScriptComplete(PrimFunc func, const ffi::Array<Buffer>& root_allocates,
+                        bool is_tirx = false);
 
 }  // namespace tirx
 }  // namespace tvm

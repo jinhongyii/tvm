@@ -122,12 +122,12 @@ def test_reused_var_across_module():
     class expected:
         @T.prim_func
         def func_a():
-            var = T.int32(10)
+            var: T.let = T.int32(10)
             T.evaluate(var)
 
         @T.prim_func
         def func_b():
-            var = T.int32(10)
+            var: T.let = T.int32(10)
             T.evaluate(var)
 
     after = tvm.tirx.transform.ConvertSSA()(before)

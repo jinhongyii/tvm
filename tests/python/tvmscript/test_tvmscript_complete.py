@@ -282,8 +282,7 @@ def match_buffer_func(a: T.handle) -> None:
             with T.sblock():
                 for j in range(0, 16):
                     with T.sblock():
-                        A1 = T.match_buffer(A0[j], ())
-                        A1[()] = 1.0
+                        T.match_buffer(A0[j], ())
 
 
 @T.prim_func
@@ -301,8 +300,7 @@ def expected_match_buffer_func(a: T.handle) -> None:
                     with T.sblock():
                         T.reads([])
                         T.writes(A0[j])
-                        A1 = T.match_buffer(A0[j], ())
-                        A1[()] = 1.0
+                        T.match_buffer(A0[j], ())
 
 
 def test_complete_match_buffer():

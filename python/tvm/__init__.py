@@ -51,9 +51,6 @@ from . import script
 # tvm.tirx — registers itself via tvm.script.register_dialect in its __init__
 from . import tirx
 
-# tvm.s_tir
-from . import s_tir
-
 # tvm.target
 from . import target
 
@@ -81,6 +78,8 @@ if not _RUNTIME_ONLY:
 # NOTE: This file should be python2 compatible so we can
 # raise proper error message when user run the package using
 # an older version of the python
+
+from .tirx.operator import tile_primitive_dispatch
 
 
 def _should_print_backtrace():

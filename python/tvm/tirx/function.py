@@ -60,15 +60,12 @@ class PrimFunc(BaseFunc, Scriptable):
         The location of this itervar in the source code.
     """
 
-    def __init__(
-        self,
-        params,
-        body,
-        ret_type=None,
-        buffer_map=None,
-        attrs=None,
-        span=None,
-    ):
+    def __init__(self, params, body, ret_type=None, buffer_map=None, attrs=None, span=None):
+        # Legacy compatibility: expand body-carrying leaf stmt wrappers
+        # (e.g. DeclBuffer/AllocBuffer forms) into SeqStmt form.
+        from .stmt import _normalize_legacy_stmt
+
+        body = _normalize_legacy_stmt(body)
         param_list = []
         buffer_map = {} if buffer_map is None else buffer_map
         for x in params:

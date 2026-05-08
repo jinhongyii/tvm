@@ -125,6 +125,20 @@ constexpr const char* kTarget = "target";
  */
 constexpr const char* kGlobalSymbol = "global_symbol";
 
+/*!
+ * \brief The function is a TIR primitive function.
+ *
+ * Type: Bool
+ */
+constexpr const char* kIsTIRx = "is_tirx";
+
+/*!
+ * \brief Number of inputs of the Primfunc
+ *
+ * Type: Int
+ */
+constexpr const char* kNumInputs = "num_inputs";
+
 }  // namespace attr
 
 /*!

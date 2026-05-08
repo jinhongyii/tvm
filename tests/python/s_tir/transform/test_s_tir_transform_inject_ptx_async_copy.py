@@ -61,8 +61,8 @@ def generate_global_to_shared_vectorized_copy(dtype, vector_size):
                 for j in T.vectorized(vector_size):
                     A_shared[tx, i * vector_size_expr + j] = A[tx, i * vector_size_expr + j]
 
-            T.evaluate(T.ptx_commit_group(dtype=""))
-            T.evaluate(T.ptx_wait_group(0, dtype=""))
+            T.evaluate(T.ptx.cp_async.commit_group(dtype=""))
+            T.evaluate(T.ptx.cp_async.wait_group(0, dtype=""))
 
             for i in range(128):
                 B[tx, i] = A_shared[tx, i]
@@ -88,8 +88,8 @@ def ptx_global_to_shared_copy_fp32x1(
         for i in T.serial(128):
             A_shared[tx, i] = A[tx, i]
 
-        T.evaluate(T.ptx_commit_group(dtype=""))
-        T.evaluate(T.ptx_wait_group(0, dtype=""))
+        T.evaluate(T.ptx.cp_async.commit_group(dtype=""))
+        T.evaluate(T.ptx.cp_async.wait_group(0, dtype=""))
 
         for i in range(128):
             B[tx, i] = A_shared[tx, i]
@@ -118,8 +118,8 @@ def ptx_global_to_shared_dyn_copy_fp16x8(
                 A_shared[tx, i * 8 + j] = A[tx, i * 8 + j]
                 B_shared[tx, i * 8 + j] = B[tx, i * 8 + j]
 
-        T.evaluate(T.ptx_commit_group(dtype=""))
-        T.evaluate(T.ptx_wait_group(0, dtype=""))
+        T.evaluate(T.ptx.cp_async.commit_group(dtype=""))
+        T.evaluate(T.ptx.cp_async.wait_group(0, dtype=""))
 
         for i in range(128):
             C[tx, i] = A_shared[tx, i] + B_shared[tx, i]
@@ -203,15 +203,15 @@ def ptx_global_to_shared_copy_fp32x1_barrier(
         T.writes(B[0:32, 0:128])
 
         T.evaluate(T.create_barriers(1, dtype=""))
-        T.evaluate(T.ptx_init_barrier_thread_count(0, 32, dtype=""))
+        T.evaluate(T.init_barrier_thread_count(0, 32, dtype=""))
 
         T.attr("default", "async_scope", 1)
         for i in T.serial(128):
             A_shared[tx, i] = A[tx, i]
 
-        T.evaluate(T.ptx_cp_async_barrier(0, dtype=""))
-        T.evaluate(T.ptx_arrive_barrier(0, dtype=""))
-        T.evaluate(T.ptx_wait_barrier(0, dtype=""))
+        T.evaluate(T.ptx.cp_async.mbarrier.arrive(0, dtype=""))
+        T.evaluate(T.arrive_barrier(0, dtype=""))
+        T.evaluate(T.wait_barrier(0, dtype=""))
 
         for i in range(128):
             B[tx, i] = A_shared[tx, i]
@@ -980,7 +980,7 @@ def test_multiplication_nodes_are_inlined():
             A_shared = T.decl_buffer((4096,), "float16", scope="shared")
             for i in range(16):
                 cse_v1: T.int64 = T.Cast("int64", i)
-                T.ptx_cp_async(
+                T.ptx.cp_async(
                     "float16",
                     A_shared.data,
                     tx * T.int64(128) + cse_v1 * T.int64(8),
@@ -988,8 +988,8 @@ def test_multiplication_nodes_are_inlined():
                     tx * T.int64(128) + cse_v1 * T.int64(8),
                     16,
                 )
-            T.ptx_commit_group()
-            T.ptx_wait_group(0)
+            T.ptx.cp_async.commit_group()
+            T.ptx.cp_async.wait_group(0)
 
     After = tvm.s_tir.transform.InjectPTXAsyncCopy()(Before)
     tvm.ir.assert_structural_equal(After, Expected)

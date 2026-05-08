@@ -207,7 +207,7 @@ def get_ldmatrix_intrin(
             T.writes(warp[0:WARP_SIZE, 0:local_size])
             for tx in T.thread_binding(0, WARP_SIZE, "threadIdx.x"):
                 T.evaluate(
-                    T.ptx_ldmatrix(
+                    T.ptx.ldmatrix(
                         transpose_in_ldmatrix,
                         4,  # Always load 4 matrices
                         ".b16",
@@ -430,7 +430,7 @@ def get_mma_intrin(
 
             for tx in T.thread_binding(0, WARP_SIZE, "threadIdx.x"):
                 T.evaluate(
-                    T.ptx_mma(
+                    T.ptx.mma(
                         mma_prefix,
                         "row",
                         "col",
@@ -449,7 +449,7 @@ def get_mma_intrin(
                 )
 
                 T.evaluate(
-                    T.ptx_mma(
+                    T.ptx.mma(
                         mma_prefix,
                         "row",
                         "col",
@@ -1580,7 +1580,7 @@ def get_mma_load_intrin(
 
             for tx in T.thread_binding(0, WARP_SIZE, "threadIdx.x"):
                 T.evaluate(
-                    T.ptx_ldmatrix(
+                    T.ptx.ldmatrix(
                         trans,
                         4,  # Always load 4 matrices
                         ".b16",
@@ -1675,7 +1675,7 @@ def get_mma_sync_intrin(
             T.reads(C[0:m_dim, 0:n_dim], A[0:m_dim, 0:k_dim], B[0:B_shape_0, 0:B_shape_1])
             T.writes(C[0:m_dim, 0:n_dim])
             T.evaluate(
-                T.ptx_mma(
+                T.ptx.mma(
                     f"m{m_dim}n{n_dim}k{k_dim}",
                     "row",
                     "col",

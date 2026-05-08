@@ -37,14 +37,14 @@ def ptx_cp_async(A: T.Buffer((32, 128), "float16"), B: T.Buffer((32, 128), "floa
 
         for i in range(16):
             T.evaluate(
-                T.ptx_cp_async(
+                T.ptx.cp_async(
                     A_shared.data, tx * 128 + 8 * i, A.data, tx * 128 + 8 * i, 16, dtype="float16"
                 )
             )
 
         # TODO(masahi): Remove dtype requirement from TVMScript parser
-        T.evaluate(T.ptx_commit_group(dtype=""))
-        T.evaluate(T.ptx_wait_group(0, dtype=""))
+        T.evaluate(T.ptx.cp_async.commit_group(dtype=""))
+        T.evaluate(T.ptx.cp_async.wait_group(0, dtype=""))
 
         for i in range(128):
             B[tx, i] = A_shared[tx, i]
@@ -65,7 +65,7 @@ def test_ptx_cp_async():
 
 
 @T.prim_func
-def ptx_cp_async_barrier(
+def ptx_cp_async_mbarrier_arrive(
     A: T.Buffer((32, 128), "float16"), B: T.Buffer((32, 128), "float16")
 ) -> None:
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
@@ -80,18 +80,18 @@ def ptx_cp_async_barrier(
         T.writes(B[0:32, 0:128])
 
         T.evaluate(T.create_barriers(1, dtype=""))
-        T.evaluate(T.ptx_init_barrier_thread_count(0, 32, dtype=""))
+        T.evaluate(T.init_barrier_thread_count(0, 32, dtype=""))
 
         for i in range(16):
             T.evaluate(
-                T.ptx_cp_async(
+                T.ptx.cp_async(
                     A_shared.data, tx * 128 + 8 * i, A.data, tx * 128 + 8 * i, 16, dtype="float16"
                 )
             )
 
-        T.evaluate(T.ptx_cp_async_barrier(0, dtype=""))
-        T.evaluate(T.ptx_arrive_barrier(0, dtype=""))
-        T.evaluate(T.ptx_wait_barrier(0, dtype=""))
+        T.evaluate(T.ptx.cp_async.mbarrier.arrive(0, dtype=""))
+        T.evaluate(T.arrive_barrier(0, dtype=""))
+        T.evaluate(T.wait_barrier(0, dtype=""))
 
         for i in range(128):
             B[tx, i] = A_shared[tx, i]
@@ -99,7 +99,7 @@ def ptx_cp_async_barrier(
 
 @tvm.testing.requires_cuda_compute_version(9)
 def test_ptx_cp_async_barrier():
-    f = ptx_cp_async_barrier
+    f = ptx_cp_async_mbarrier_arrive
 
     mod = tvm.compile(f, target="cuda")
     A_np = np.random.rand(32, 128).astype("float16")
@@ -125,14 +125,14 @@ def ptx_cp_async_bulk(A: T.Buffer((32, 128), "float16"), B: T.Buffer((32, 128), 
         T.writes(B[0:32, 0:128])
 
         T.evaluate(T.create_barriers(1, dtype=""))
-        T.evaluate(T.ptx_init_barrier_thread_count(0, 32, dtype=""))
+        T.evaluate(T.init_barrier_thread_count(0, 32, dtype=""))
 
         T.evaluate(
-            T.ptx_cp_async_bulk(A_shared.data, tx * 128, A.data, tx * 128, 256, 0, dtype="float16")
+            T.ptx.cp_async.bulk(A_shared.data, tx * 128, A.data, tx * 128, 256, 0, dtype="float16")
         )
 
-        T.evaluate(T.ptx_arrive_barrier_expect_tx(0, 256, dtype=""))
-        T.evaluate(T.ptx_wait_barrier(0, dtype=""))
+        T.evaluate(T.arrive_barrier_expect_tx(0, 256, dtype=""))
+        T.evaluate(T.wait_barrier(0, dtype=""))
 
         for i in range(128):
             B[tx, i] = A_shared[tx, i]
@@ -154,5 +154,3 @@ def test_ptx_cp_async_bulk():
 
 if __name__ == "__main__":
     test_ptx_cp_async()
-    test_ptx_cp_async_barrier()
-    test_ptx_cp_async_bulk()

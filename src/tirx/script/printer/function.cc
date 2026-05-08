@@ -17,6 +17,7 @@
  * under the License.
  */
 #include <tvm/runtime/device_api.h>
+#include <tvm/runtime/logging.h>
 
 #include "./utils.h"
 
@@ -45,6 +46,13 @@ bool IsSimpleBuffer(const tirx::Buffer& buf) {
     if (elem_offset->value != 0) {
       return false;
     }
+  }
+  if (!buf->layout.defined() ||
+      !ffi::StructuralEqual()(buf->layout, tirx::TileLayoutNode::DefaultLayout(buf->shape))) {
+    return false;
+  }
+  if (!buf->allocated_addr.empty()) {
+    return false;
   }
   return buf.scope() == "global" && buf->data_alignment == runtime::kAllocAlignment &&
          buf->offset_factor == 1 && buf->buffer_type == tirx::BufferType::kDefault &&
@@ -106,24 +114,30 @@ TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
       // Step 2. Handle `func->attrs`
       if (func->attrs.defined() && !func->attrs->dict.empty()) {
         // for global symbol, don't display it if it matches the func name
+        std::unordered_set<ffi::String> keys_to_remove;
         if (func->attrs->dict.count(tvm::attr::kGlobalSymbol) &&
             Downcast<ffi::String>(func->attrs->dict.at(tvm::attr::kGlobalSymbol)) ==
                 func_name->name) {
-          ffi::Map<ffi::String, Any> new_attrs;
-          for (auto kv : func->attrs->dict) {
-            if (kv.first != tvm::attr::kGlobalSymbol) {
-              new_attrs.Set(kv.first, kv.second);
-            }
+          keys_to_remove.insert(tvm::attr::kGlobalSymbol);
+        }
+        // for TIRx, don't display it (shown in decorator)
+        if (func->attrs->dict.count(tvm::attr::kIsTIRx)) {
+          keys_to_remove.insert(tvm::attr::kIsTIRx);
+        }
+        // for persistent, don't display it (shown in decorator)
+        if (func->attrs->dict.count(tirx::attr::kPersistentKernel)) {
+          keys_to_remove.insert(tirx::attr::kPersistentKernel);
+        }
+        ffi::Map<ffi::String, Any> new_attrs;
+        for (auto kv : func->attrs->dict) {
+          if (!keys_to_remove.count(kv.first)) {
+            new_attrs.Set(kv.first, kv.second);
           }
-          if (!new_attrs.empty()) {
-            (*f)->stmts.push_back(ExprStmtDoc(
-                TIR(d, "func_attr")  //
-                    ->Call({d->AsDoc<ExprDoc>(DictAttrs(new_attrs), p->Attr("attrs"))})));
-          }
-        } else {
+        }
+        if (!new_attrs.empty()) {
           (*f)->stmts.push_back(
               ExprStmtDoc(TIR(d, "func_attr")  //
-                              ->Call({d->AsDoc<ExprDoc>(func->attrs, p->Attr("attrs"))})));
+                              ->Call({d->AsDoc<ExprDoc>(DictAttrs(new_attrs), p->Attr("attrs"))})));
         }
       }
       // Step 3. Handle `func->buffer_map`
@@ -189,13 +203,23 @@ TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
       }
       // Step 5. Determine if we need to display the private annotation in the decorator
       ExprDoc decorator = TIR(d, "prim_func");
+      ffi::Array<ffi::String, void> kwargs_keys;
+      ffi::Array<ExprDoc, void> kwargs_values;
       // mark private if there is no global symbol
       if (!func->attrs.defined() || !func->attrs->dict.count(tvm::attr::kGlobalSymbol)) {
-        ffi::Array<ExprDoc> pos_args;
-        decorator = decorator->Call(pos_args, {"private"},
-                                    {LiteralDoc::Boolean(true, ffi::Optional<AccessPath>())});
+        kwargs_keys.push_back("private");
+        kwargs_values.push_back(LiteralDoc::Boolean(true, ffi::Optional<AccessPath>()));
       }
-
+      if (func->attrs.defined() && func->attrs->dict.count(tvm::attr::kIsTIRx)) {
+        kwargs_keys.push_back("tirx");
+        kwargs_values.push_back(LiteralDoc::Boolean(true, ffi::Optional<AccessPath>()));
+      }
+      if (func->attrs.defined() && func->attrs->dict.count(tirx::attr::kPersistentKernel)) {
+        kwargs_keys.push_back("persistent");
+        kwargs_values.push_back(LiteralDoc::Boolean(true, ffi::Optional<AccessPath>()));
+      }
+      ffi::Array<ExprDoc> pos_args;
+      decorator = std::move(decorator->Call(pos_args, kwargs_keys, kwargs_values));
       return HeaderWrapper(d, FunctionDoc(
                                   /*name=*/func_name,
                                   /*args=*/args,

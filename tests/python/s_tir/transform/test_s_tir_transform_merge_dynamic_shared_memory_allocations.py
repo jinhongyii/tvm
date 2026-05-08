@@ -257,8 +257,8 @@ def test_async_copy():
             A_sh = T.alloc_buffer((128,), "float32", scope="shared.dyn")
             B_sh = T.alloc_buffer((128,), "float32", scope="shared.dyn")
             threadIdx_x = T.launch_thread("threadIdx.x", 128)
-            T.ptx_cp_async("float32", A_sh.data, threadIdx_x, A.data, threadIdx_x, 512)
-            T.ptx_cp_async("float32", B_sh.data, threadIdx_x, B.data, threadIdx_x, 512)
+            T.ptx.cp_async("float32", A_sh.data, threadIdx_x, A.data, threadIdx_x, 512)
+            T.ptx.cp_async("float32", B_sh.data, threadIdx_x, B.data, threadIdx_x, 512)
 
     After = transform(Before)
     # The pass merges shared.dyn allocations but DeclBuffer nodes from the original

@@ -224,7 +224,7 @@ def test_op_ptx_ldmatrix():
     buffer_shared = tirx.decl_buffer([16, 16], "float16", scope="shared")
     buffer_local = tirx.decl_buffer([8], "float16", scope="local")
     expr = tirx.ptx_ldmatrix(
-        "float16", False, 4, ".b16", buffer_local.data, 0, buffer_shared.data, 0
+        buffer_local.data, buffer_shared.data, num=4, dtype=".b16", trans=False
     )
     assert expr.op.name == "tirx.ptx_ldmatrix"
 

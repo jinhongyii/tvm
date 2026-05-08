@@ -204,5 +204,69 @@ def test_e2m1_dequantize():
         tvm.compile(mod, target=target)
 
 
+@tvm.testing.requires_cuda_compute_version(10)
+def test_e2m1_scalar_buffer_offset():
+    """Regression test: float4_e2m1fn scalar buffer access uses correct byte offset.
+
+    In CUDA sizeof(__nv_fp4_e2m1) = 1 byte, but fp4 data packs 2 elements per
+    byte.  GetBufferRef must emit ``index / 2`` so that the element index is
+    converted to the correct byte offset.  Without the fix the index was used
+    as-is, producing addresses 2x too large — reading garbage from out-of-bounds
+    memory instead of the correct fp4 value.
+
+    We verify by writing known fp4 values, casting each element to float16 on
+    the GPU, and checking the results match the expected fp4->fp16 conversion.
+    """
+    n = 128
+
+    @T.prim_func
+    def func(A_raw: T.Buffer((n // 2,), "uint8"), B: T.Buffer((n,), "float16")):
+        T.func_attr({"tir.noalias": True})
+        A = T.decl_buffer((n,), "float4_e2m1fn", data=A_raw.data)
+        for i in range(n):
+            with T.sblock("B"):
+                vi = T.axis.spatial(n, i)
+                T.reads(A[vi])
+                T.writes(B[vi])
+                B[vi] = T.Cast("float16", A[vi])
+
+    sch = tvm.tir.Schedule(func)
+    block = sch.get_sblock("B")
+    loops = sch.get_loops(block)
+    bx, tx = sch.split(loops[0], factors=[None, 32])
+    sch.bind(bx, "blockIdx.x")
+    sch.bind(tx, "threadIdx.x")
+
+    target = "cuda"
+    dev = tvm.device(target, 0)
+    fadd = tvm.compile(sch.mod, target=target)
+
+    # float4_e2m1fn: 4-bit values 0..15, two packed per byte.
+    # Encoding (sign | exp1 | man1 man0):
+    #   0→0.0  1→0.5  2→1.0  3→1.5  4→2.0  5→3.0  6→4.0  7→6.0
+    #   8→-0.0 9→-0.5 10→-1.0 … 15→-6.0
+    fp4_to_fp16 = np.array(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+        dtype=np.float16,
+    )
+
+    # Pack DIFFERENT fp4 values in low/high nibbles so the test verifies
+    # both byte offset (/2) AND correct nibble extraction (% 2 shift).
+    fp4_elements = np.array([i % 16 for i in range(n)], dtype=np.uint8)
+    packed = np.zeros(n // 2, dtype=np.uint8)
+    for i in range(0, n, 2):
+        packed[i // 2] = fp4_elements[i] | (fp4_elements[i + 1] << 4)
+
+    expected = fp4_to_fp16[fp4_elements]
+
+    a = tvm.runtime.empty(shape=(n // 2,), dtype="uint8", device=dev)
+    a.copyfrom(packed)
+    b = tvm.runtime.empty(shape=(n,), dtype="float16", device=dev)
+    fadd(a, b)
+
+    result = b.numpy()
+    tvm.testing.assert_allclose(result, expected)
+
+
 if __name__ == "__main__":
     tvm.testing.main()

@@ -16,11 +16,15 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/runtime/logging.h>
 #include <tvm/script/ir_builder/ir/ir.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/exec_scope.h>
 #include <tvm/tirx/function.h>
+#include <tvm/tirx/op.h>
 #include <tvm/tirx/script/builder/frame.h>
 
-#include "../../ir/script/script_complete.h"
+#include "../../../tirx/ir/script/script_complete.h"
 #include "./utils.h"
 
 namespace tvm {
@@ -32,6 +36,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   TIRFrameNode::RegisterReflection();
   PrimFuncFrameNode::RegisterReflection();
   SBlockFrameNode::RegisterReflection();
+  ExecScopeFrameNode::RegisterReflection();
   BlockInitFrameNode::RegisterReflection();
   ForFrameNode::RegisterReflection();
   AssertFrameNode::RegisterReflection();
@@ -41,23 +46,46 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   IfFrameNode::RegisterReflection();
   ThenFrameNode::RegisterReflection();
   ElseFrameNode::RegisterReflection();
+  ComposeOpFrameNode::RegisterReflection();
+  DeclBufferFrameNode::RegisterReflection();
+  AllocBufferFrameNode::RegisterReflection();
+  HintFrameNode::RegisterReflection();
 }
 
 void PrimFuncFrameNode::ExitWithScope() {
   TIRFrameNode::ExitWithScope();
   // if the prim func is not private and there isn't already a global symbol,
   // add a global symbol
+  auto insert_attr = [&](ffi::String key, ffi::Any value) {
+    if (!attrs.defined()) {
+      attrs = {{key, value}};
+    } else if (!attrs.count(key)) {
+      // copy over attributes (can't mutate the dict inside the optional in-place)
+      ffi::Map<ffi::String, ffi::Any> new_attrs;
+      for (auto kv : attrs) {
+        new_attrs.Set(kv.first, kv.second);
+      }
+      new_attrs.Set(key, value);
+      attrs = std::move(new_attrs);
+    }
+  };
   if (!is_private && name.has_value() && !attrs.count(tvm::attr::kGlobalSymbol)) {
-    attrs.Set(tvm::attr::kGlobalSymbol, name.value());
+    insert_attr(tvm::attr::kGlobalSymbol, name.value());
   }
-
+  if (is_tirx) {
+    insert_attr(tvm::attr::kIsTIRx, tvm::Bool(true));
+  }
+  if (persistent) {
+    insert_attr(tvm::tirx::attr::kPersistentKernel, tvm::Bool(true));
+  }
   tvm::tirx::PrimFunc func(
       /*params=*/args,
       /*body=*/AsStmt(stmts),
       /*ret_type=*/ret_type.value_or(TupleType::Empty()),
       /*buffer_map=*/buffer_map,
-      /*attrs=*/DictAttrs(attrs));
-  func = tvm::tirx::ScriptComplete(func, root_alloc_buffers);
+      /*attrs=*/attrs.defined() ? DictAttrs(attrs) : NullValue<DictAttrs>(),
+      /*span=*/tvm::Span());
+  func = tvm::tirx::ScriptComplete(func, root_alloc_buffers, is_tirx);
   IRBuilder builder = IRBuilder::Current();
   if (builder->frames.empty()) {
     TVM_FFI_CHECK(!builder->result.defined(), ValueError) << "Builder.result has already been set";
@@ -82,6 +110,16 @@ void PrimFuncFrameNode::ExitWithScope() {
 
 void SBlockFrameNode::ExitWithScope() {
   TIRFrameNode::ExitWithScope();
+
+  ffi::Optional<PrimFuncFrame> frame = IRBuilder::Current()->FindFrame<PrimFuncFrame>();
+  TVM_FFI_ICHECK(frame.defined()) << "ValueError: Block must be defined within a PrimFunc";
+
+  // Hard-disable SBlock in tirx=True context
+  TVM_FFI_ICHECK(!frame.value()->is_tirx)
+      << "ValueError: `T.sblock()` / `Tx.sblock()` is not allowed in tirx=True mode. "
+         "Use `with Tx.kernel/cta/warp/thread(...)` for execution scopes and "
+         "`T.attr(...)` for annotations instead.";
+
   ffi::Array<tvm::tirx::Buffer> tir_alloc_buffers;
   for (const tvm::tirx::Buffer& buffer : alloc_buffers) {
     tir_alloc_buffers.push_back(buffer);
@@ -92,7 +130,8 @@ void SBlockFrameNode::ExitWithScope() {
   }
   tvm::tirx::SBlock block(iter_vars, reads.value_or(ffi::Array<tvm::tirx::BufferRegion>()),
                           writes.value_or(ffi::Array<tvm::tirx::BufferRegion>()), name,
-                          AsStmt(stmts), init, tir_alloc_buffers, match_buffers, attrs);
+                          AsStmt(stmts), init, tir_alloc_buffers, match_buffers, attrs,
+                          tvm::Span());
   if (no_realize) {
     TVM_FFI_CHECK(iter_values.empty(), ValueError)
         << "Block bindings are not allowed when `no_realize=True`";
@@ -102,6 +141,22 @@ void SBlockFrameNode::ExitWithScope() {
   } else {
     AddToParent(tvm::tirx::SBlockRealize(iter_values, predicate.value_or(Bool(true)), block));
   }
+}
+
+void ExecScopeFrameNode::ExitWithScope() {
+  TIRFrameNode::ExitWithScope();
+  TVM_FFI_ICHECK(exec_scope.defined())
+      << "InternalError: ExecScopeFrame must have an execution scope";
+  tvm::tirx::Stmt body = AsStmt(stmts);
+  tvm::tirx::Stmt stmt = tvm::tirx::ExecScopeStmt(exec_scope.value(), body);
+  ffi::Optional<PrimExpr> guard = std::nullopt;
+  for (const PrimExpr& predicate : guards) {
+    guard = guard.defined() ? PrimExpr(guard.value() && predicate) : predicate;
+  }
+  if (guard.defined()) {
+    stmt = tvm::tirx::IfThenElse(guard.value(), stmt);
+  }
+  AddToParent(stmt);
 }
 
 void BlockInitFrameNode::EnterWithScope() {
@@ -195,6 +250,48 @@ void ElseFrameNode::EnterWithScope() {
 void ElseFrameNode::ExitWithScope() {
   TIRFrameNode::ExitWithScope();
   FindIfFrame("T.else_")->else_stmts = stmts;
+}
+
+void DeclBufferFrameNode::ExitWithScope() {
+  TIRFrameNode::ExitWithScope();
+  if (allocated) {
+    AddToParent(tvm::tirx::SeqStmt::Flatten(tvm::tirx::DeclBuffer(buffer), AsStmt(stmts)));
+  } else {
+    // data is undefined in `decl_buffer(...)`, lower to `alloc_buffer(...)`.
+    AddToParent(tvm::tirx::SeqStmt::Flatten(tvm::tirx::AllocBuffer(buffer), AsStmt(stmts)));
+  }
+}
+
+void ComposeOpFrameNode::ExitWithScope() {
+  TIRFrameNode::ExitWithScope();
+  ffi::Array<ffi::ObjectRef> ops;
+  for (const auto& stmt : stmts) {
+    auto op_call = stmt.as<tvm::tirx::TilePrimitiveCallNode>();
+    TVM_FFI_ICHECK(op_call) << "ValueError: Only TIRx op calls allowed in ComposeOp. Violated by "
+                            << stmt;
+    ops.push_back(ffi::GetRef<tvm::tirx::TilePrimitiveCall>(op_call));
+  }
+  auto compose_op_op = tvm::Op::Get("tirx.compose_op");
+  AddToParent(tvm::tirx::TilePrimitiveCall(compose_op_op, ops, workspace, config, dispatch));
+}
+
+void AllocBufferFrameNode::ExitWithScope() {
+  TIRFrameNode::ExitWithScope();
+  AddToParent(tvm::tirx::SeqStmt::Flatten(tvm::tirx::AllocBuffer(buffer), AsStmt(stmts)));
+}
+
+void HintFrameNode::ExitWithScope() {
+  TIRFrameNode::ExitWithScope();
+  // Always store attrs as a structured Map in the node field
+  ffi::Map<ffi::String, Any> full_attrs;
+  if (!message.empty()) {
+    full_attrs.Set("message", ffi::String(message));
+  }
+  for (const auto& [k, v] : attrs) {
+    full_attrs.Set(k, v);
+  }
+  AddToParent(
+      tvm::tirx::AttrStmt(full_attrs, "tirx_hint", IntImm(DataType::Int(32), 1), AsStmt(stmts)));
 }
 
 }  // namespace tirx

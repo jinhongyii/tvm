@@ -69,7 +69,7 @@ def mma_sp_m16n8k16_f16f16f16(a: T.handle, b: T.handle, c: T.handle, _metadata: 
     meta_local[0] = metadata[tx // 4]
 
     T.evaluate(
-        T.ptx_mma_sp(
+        T.ptx.mma.sp(
             "m16n8k16",
             "row",
             "col",
@@ -123,7 +123,7 @@ def mma_sp_m16n8k16_f16f16f32(a: T.handle, b: T.handle, c: T.handle, _metadata: 
     meta_local[0] = metadata[tx // 4]
 
     T.evaluate(
-        T.ptx_mma_sp(
+        T.ptx.mma.sp(
             "m16n8k16",
             "row",
             "col",
@@ -177,7 +177,7 @@ def mma_sp_m16n8k32_f16f16f16(a: T.handle, b: T.handle, c: T.handle, _metadata: 
     meta_local[0] = metadata[tx // 4 * 2 + tx % 2]
 
     T.evaluate(
-        T.ptx_mma_sp(
+        T.ptx.mma.sp(
             "m16n8k32",
             "row",
             "col",
@@ -231,7 +231,7 @@ def mma_sp_m16n8k32_f16f16f32(a: T.handle, b: T.handle, c: T.handle, _metadata: 
     meta_local[0] = metadata[tx // 4 * 2 + tx % 2]
 
     T.evaluate(
-        T.ptx_mma_sp(
+        T.ptx.mma.sp(
             "m16n8k32",
             "row",
             "col",

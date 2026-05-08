@@ -26,13 +26,13 @@
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/s_tir/analysis.h>
 #include <tvm/s_tir/stmt.h>
 #include <tvm/s_tir/transform.h>
 #include <tvm/tirx/buffer.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
-#include <tvm/runtime/logging.h>
 
 #include <optional>
 #include <set>
@@ -57,7 +57,8 @@ class AsyncDMALowerer : public arith::IRMutatorWithAnalyzer {
     }
 
     // if for loop is not a memcpy of a contiguous region, it might be a cuda cp.async behavior
-    std::optional<MemCpyDetails> mem_copy = IdentifyMemCpy(ffi::GetRef<For>(loop), analyzer_);
+    std::optional<s_tir::MemCpyDetails> mem_copy =
+        s_tir::IdentifyMemCpy(ffi::GetRef<For>(loop), analyzer_);
     if (!mem_copy.has_value() || mem_copy->dest->region.size() != 1 ||
         mem_copy->source->region.size() != 1) {
       return arith::IRMutatorWithAnalyzer::VisitStmt_(loop);

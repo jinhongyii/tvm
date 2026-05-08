@@ -16,6 +16,8 @@
 # under the License.
 """Target data structure."""
 
+import shlex
+
 import tvm_ffi
 from tvm_ffi import Map
 from tvm_ffi.core import String
@@ -23,6 +25,46 @@ from tvm_ffi.core import String
 from tvm.runtime import Device, Object, convert
 
 from . import _ffi_api
+
+
+def _try_parse_legacy_target_string(target: str):
+    """Parse legacy CLI-like target strings into config dicts.
+
+    Example: ``"cuda -arch=sm_100a"`` -> ``{"kind": "cuda", "arch": "sm_100a"}``
+    """
+    if " " not in target or "-" not in target:
+        return None
+    try:
+        tokens = shlex.split(target)
+    except ValueError:
+        return None
+    if len(tokens) <= 1:
+        return None
+    if not all(tok.startswith("-") for tok in tokens[1:]):
+        return None
+
+    config = {"kind": tokens[0]}
+    for tok in tokens[1:]:
+        keyval = tok.lstrip("-")
+        if not keyval:
+            return None
+        if "=" in keyval:
+            key, value = keyval.split("=", 1)
+        else:
+            key, value = keyval, True
+        if isinstance(value, str):
+            value_lower = value.lower()
+            if value_lower == "true":
+                value = True
+            elif value_lower == "false":
+                value = False
+            else:
+                try:
+                    value = int(value)
+                except ValueError:
+                    pass
+        config[key] = value
+    return config
 
 
 @tvm_ffi.register_object("target.TargetKind")
@@ -131,6 +173,10 @@ class Target(Object):
             When using a dictionary or json string to configure target, the possible values are
             same as target.
         """
+        if isinstance(target, str):
+            legacy_config = _try_parse_legacy_target_string(target)
+            if legacy_config is not None:
+                target = legacy_config
         if isinstance(target, dict | str):
             target = convert(target)
         if isinstance(host, dict | str):
@@ -197,6 +243,18 @@ class Target(Object):
     @property
     def features(self):
         return TargetFeatures(self)
+
+    def __getattr__(self, name: str):
+        """Backward-compatible attribute access for target attrs.
+
+        Historically, code accessed target options via attribute syntax
+        (e.g. ``target.arch``). Newer APIs prefer ``target.attrs["arch"]``.
+        """
+        attrs = self.attrs
+        if name in attrs:
+            value = attrs[name]
+            return str(value) if isinstance(value, String) else value
+        raise AttributeError(f"'Target' object has no attribute '{name}'")
 
     def get_kind_attr(self, attr_name):
         """Get additional attribute about the target kind.

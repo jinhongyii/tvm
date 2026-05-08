@@ -114,7 +114,7 @@ def test_tir_macro_decorator_signature():
         T.evaluate(0)
 
     # Ok, no parentheses
-    @T.macro
+    @T.inline
     def func1():
         T.evaluate(0)
 
@@ -125,7 +125,7 @@ def test_tir_macro_decorator_signature():
     tvm.ir.assert_structural_equal(use1, evaluate0)
 
     # Ok, empty parentheses
-    @T.macro()
+    @T.inline()
     def func2():
         T.evaluate(0)
 
@@ -137,13 +137,13 @@ def test_tir_macro_decorator_signature():
 
     with pytest.raises(ValueError):
         # Wrong: non-keyword argument
-        @T.macro(True)
+        @T.inline(True)
         def func3():
             T.evaluate()
 
 
 def test_tir_macro_signature():
-    @T.macro
+    @T.inline
     def assign(i, *args, t1, **kwargs):
         vi, vj, vk = T.axis.remap("SSR", [i, args[0], args[1]])
         kwargs["t3"][vi, vj] = kwargs["t3"][vi, vj] + t1[vi, vk] * kwargs["t2"][vj, vk]
@@ -173,7 +173,7 @@ def test_tir_macro_signature():
 def test_tir_macro_hygienic():
     x_value = 128
 
-    @T.macro(hygienic=True)
+    @T.inline
     def static_capture(A, B):
         B[()] = A[x_value]
 
@@ -190,24 +190,26 @@ def test_tir_macro_hygienic():
     tvm.ir.assert_structural_equal(use_hygienic, expected_hygienic)
 
 
-def test_tir_macro_non_hygienic():
-    x_value = 128
-
-    @T.macro(hygienic=False)
-    def dynamic_capture(A, B):
-        B[()] = A[x_value]
+def test_tir_inline_late_binding():
+    """Inline defined inside prim_func uses LEGB late binding:
+    it sees the current value of variables from its enclosing scope at call time."""
 
     @T.prim_func(private=True)
-    def use_non_hygienic(A: T.Buffer((1024,), "int32"), B: T.Buffer((), "int32")) -> None:
+    def use_late_binding(A: T.Buffer((1024,), "int32"), B: T.Buffer((), "int32")) -> None:
         for x_value in T.serial(10):
-            dynamic_capture(A, B)
+
+            @T.inline
+            def capture(A, B):
+                B[()] = A[x_value]
+
+            capture(A, B)
 
     @T.prim_func(private=True)
-    def expected_non_hygienic(A: T.Buffer((1024,), "int32"), B: T.Buffer((), "int32")) -> None:
+    def expected(A: T.Buffer((1024,), "int32"), B: T.Buffer((), "int32")) -> None:
         for x_value in range(10):
             B[()] = A[x_value]
 
-    tvm.ir.assert_structural_equal(use_non_hygienic, expected_non_hygienic)
+    tvm.ir.assert_structural_equal(use_late_binding, expected)
 
 
 def test_tir_macro_in_class():
@@ -215,7 +217,7 @@ def test_tir_macro_in_class():
         def __init__(self, x: T.Buffer):
             self.local_x = T.sblock_alloc_buffer(x.shape, x.dtype)
 
-        @T.macro
+        @T.inline
         def load(self, x: T.Buffer):
             N, M = T.meta_var(self.local_x.shape)
             for i, j in T.grid(N, M):
@@ -355,7 +357,7 @@ def test_tir_loop_steps():
 
 
 def test_tir_empty_tuple_index():
-    @T.macro
+    @T.inline
     def bar(val):
         T.evaluate(val)
 
@@ -640,7 +642,7 @@ def test_alloc_inside_block():
 
 
 def test_tir_macro_block_name_suffix():
-    @T.macro
+    @T.inline
     def operation(A, idx):
         with T.sblock("op"):
             v = T.axis.remap("S", [idx])

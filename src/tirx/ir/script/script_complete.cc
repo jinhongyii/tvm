@@ -37,8 +37,8 @@ namespace tirx {
 /*! \brief Generate surrounding loops automatically */
 class ScriptCompleter : public StmtMutator {
  public:
-  explicit ScriptCompleter(ffi::Map<Var, Buffer>* buffer_var_map)
-      : buffer_var_map_(buffer_var_map) {}
+  explicit ScriptCompleter(ffi::Map<Var, Buffer>* buffer_var_map, bool is_tirx = false)
+      : buffer_var_map_(buffer_var_map), is_tirx_(is_tirx) {}
 
  private:
   ffi::Map<Var, Buffer>* buffer_var_map_;
@@ -81,7 +81,7 @@ class ScriptCompleter : public StmtMutator {
       mask = Downcast<IntImm>((*it).second)->value;
     }
     // ignore root block or blocks which already has reads/writes regions
-    if (mask != 0) {
+    if (mask != 0 && !is_tirx_) {
       auto access_region = GetSBlockAccessRegion(block, *buffer_var_map_);
       const ffi::Array<BufferRegion>& reads = access_region[0];
       const ffi::Array<BufferRegion>& writes = access_region[1];
@@ -119,9 +119,10 @@ class ScriptCompleter : public StmtMutator {
   }
 
   bool is_root_block_ = true;
+  bool is_tirx_ = false;
 };
 
-PrimFunc ScriptComplete(PrimFunc func, const ffi::Array<Buffer>& root_allocates) {
+PrimFunc ScriptComplete(PrimFunc func, const ffi::Array<Buffer>& root_allocates, bool is_tirx) {
   ffi::Map<Var, Buffer> buffer_var_map;
   for (const auto& pair : func->buffer_map) {
     const Buffer& buffer = pair.second;
@@ -150,13 +151,13 @@ PrimFunc ScriptComplete(PrimFunc func, const ffi::Array<Buffer>& root_allocates)
     return false;
   }();
 
-  if (should_insert_root) {
+  if (!is_tirx && should_insert_root) {
     SBlock root_block({}, {}, {}, "root", std::move(res), std::nullopt, root_allocates);
     res = SBlockRealize({}, Bool(true), std::move(root_block));
   }
 
   // generate surrounding loops automatically
-  ScriptCompleter script_completer(&buffer_var_map);
+  ScriptCompleter script_completer(&buffer_var_map, is_tirx);
   res = script_completer(std::move(res));
 
   if (func->body.same_as(res)) {

@@ -116,6 +116,9 @@ inline ExprDoc TIR(const IRDocsifier& d, const ffi::String& attr) {
   return IdDoc(d->cfg->GetExtraConfig<ffi::String>("tirx.prefix", "T"))->Attr(attr);
 }
 
+/*! \brief Alias for TIR — historical TIRx name used by tirx printer code */
+inline ExprDoc TIRx(const IRDocsifier& d, const ffi::String& attr) { return TIR(d, attr); }
+
 /*! \brief Creates the Relax common prefix, which is by default `R` */
 inline ExprDoc Relax(const IRDocsifier& d, const ffi::String& attr) {
   d->ir_usage.insert("relax");

@@ -39,7 +39,7 @@ def ptx_ldmatrix(
             A_shared[i * 2 + tx // 16, tx % 16] = A[i * 2 + tx // 16, tx % 16]
 
         T.evaluate(
-            T.ptx_ldmatrix(
+            T.ptx.ldmatrix(
                 trans,
                 num,
                 ".b16",

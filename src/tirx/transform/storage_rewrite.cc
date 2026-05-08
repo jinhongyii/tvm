@@ -27,13 +27,13 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/type.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/runtime/logging.h>
 
 #include <list>
 #include <map>
@@ -1721,6 +1721,9 @@ namespace transform {
 
 Pass StorageRewrite() {
   auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
+    // Skip if the it's TIRx function
+    if (f->attrs->dict.count(tvm::attr::kIsTIRx)) return f;
+
     bool enable_reuse = true;
     bool reuse_require_exact_matched_dtype = false;
     bool merge_static_smem = ctx->GetConfig<Bool>("tirx.merge_static_smem", Bool(false)).value();

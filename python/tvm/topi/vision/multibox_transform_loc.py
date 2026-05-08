@@ -74,14 +74,14 @@ def multibox_transform_loc(
     th = tvm.tirx.const(float(threshold), dtype)
 
     def decode_bbox(b, a, k):
-        l = anchor[0, a, 0]
+        left = anchor[0, a, 0]
         t = anchor[0, a, 1]
-        r = anchor[0, a, 2]
+        right = anchor[0, a, 2]
         br = anchor[0, a, 3]
         ay = (t + br) * half
-        ax = (l + r) * half
+        ax = (left + right) * half
         ah = br - t
-        aw = r - l
+        aw = right - left
         ex = loc_reshaped[b, a, 0]
         ey = loc_reshaped[b, a, 1]
         ew = loc_reshaped[b, a, 2]
