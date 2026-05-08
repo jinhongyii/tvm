@@ -237,7 +237,7 @@ TVM_DLL const Op& copy();
 /*!
  * \brief See pesudo code below:
  *
- * Tx.Async.copy(BufferRegion dst, BufferRegion src)
+ * Tx.Async.copy(BufferRegion dst, BufferRegion src, BaseEvent event)
  */
 TVM_DLL const Op& copy_async();
 
@@ -300,6 +300,12 @@ TVM_DLL const Op& unary_reduce();
 TVM_DLL const Op& binary_chain();
 
 TVM_DLL const Op& select();
+
+TVM_DLL const Op& event_init();
+
+TVM_DLL const Op& event_commit();
+
+TVM_DLL const Op& event_wait();
 
 /*!
  * \brief See pesudo code below:

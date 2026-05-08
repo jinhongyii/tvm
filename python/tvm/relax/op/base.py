@@ -17,6 +17,7 @@
 # ruff: noqa: F821
 """The base Relax operators."""
 
+import inspect
 from collections.abc import Callable
 
 import tvm_ffi
@@ -26,11 +27,13 @@ import tvm.runtime
 from tvm.runtime import Object, ObjectConvertible
 
 from ...ir import PrimExpr
+from ...tirx import PrimFunc
 from ..expr import Call, Expr, ExternFunc, GlobalVar, ShapeExpr, StringImm, Var
 from ..struct_info import StructInfo, TensorStructInfo
-from ..utils import convert_to_expr
+from ..utils import Dependency, convert_to_expr, trans_callable_to_primfunc
 from . import _ffi_api
 
+PrimExprLike = int | PrimExpr
 py_print = print  # pylint: disable=invalid-name
 
 
@@ -253,12 +256,145 @@ def call_tir_inplace(
         tir_vars = ShapeExpr(tir_vars)
 
     return _ffi_api.call_tir_inplace(  # type: ignore
+        gvar, args, inplace_indices, out_sinfo, tir_vars
+    )
+
+
+def call_tir_device(
+    gvar: GlobalVar,
+    args: Expr,
+    out_sinfo: TensorStructInfo | list[TensorStructInfo],
+    job_id: int,
+    tile_num: Expr | tuple[PrimExprLike, ...] | list[PrimExprLike] | None,
+    in_deps: Dependency | list[Dependency] = (),
+    out_deps: Dependency | list[Dependency] = (),
+    inverse_in_deps: Dependency | list[Dependency] | None = None,
+    inplace_indices: int | list[int] | None = None,
+    tir_vars: ShapeExpr | tuple[PrimExpr] | list[PrimExpr] | None = None,
+    handle_config: dict | None = None,
+) -> Call:
+    """Call a tile-level function and return the output."""
+    args = _wrap_inline_arg_tuple(args)
+    assert tile_num is not None or inverse_in_deps is not None, (
+        "tile_num is required when using static scheduling and "
+        "inverse_in_deps is required when using dynamic scheduling"
+    )
+
+    if tile_num is None:
+        tile_idx_dim = (
+            len(inspect.signature(in_deps[0].dep).parameters)
+            if isinstance(in_deps, list)
+            else len(inspect.signature(in_deps.dep).parameters)
+        )
+    else:
+        tile_idx_dim = len(tile_num)
+
+    if not in_deps:
+        in_dep_list, in_evt_list, in_extra_args_list = [], [], []
+    else:
+        if not isinstance(in_deps, list):
+            in_deps = [in_deps]
+        handle_dep = [
+            dep.handle_dep(tile_idx_dim + 1, len(dep.event.struct_info.shape) + 2)
+            for dep in in_deps
+        ]
+        in_dep_list, in_evt_list, in_extra_args_list = map(list, zip(*handle_dep))
+    if not out_deps:
+        out_dep_list, out_evt_list, out_extra_args_list = [], [], []
+    else:
+        if not isinstance(out_deps, list):
+            out_deps = [out_deps]
+        handle_dep = [
+            dep.handle_dep(tile_idx_dim + 1, len(dep.event.struct_info.shape) + 2)
+            for dep in out_deps
+        ]
+        out_dep_list, out_evt_list, out_extra_args_list = map(list, zip(*handle_dep))
+    if inverse_in_deps is None or not inverse_in_deps:
+        inv_in_dep_list, inv_in_evt_list, inv_in_extra_args_list = [], [], []
+    else:
+        if not isinstance(inverse_in_deps, list):
+            inverse_in_deps = [inverse_in_deps]
+        assert len(in_deps) == len(inverse_in_deps), (
+            "Length of inverse_in_deps should match that of in_deps."
+        )
+        handle_dep = [
+            dep.handle_dep(len(dep.event.struct_info.shape) + 2, tile_idx_dim + 1)
+            for dep in inverse_in_deps
+        ]
+        inv_in_dep_list, inv_in_evt_list, inv_in_extra_args_list = map(list, zip(*handle_dep))
+
+    if not isinstance(out_sinfo, list):
+        out_sinfo = [out_sinfo]
+    if inplace_indices is None:
+        inplace_indices = [-1 for _ in range(len(out_sinfo))]
+    if not isinstance(inplace_indices, list):
+        inplace_indices = [inplace_indices]
+    if isinstance(tile_num, list | tuple):
+        tile_num = ShapeExpr(tile_num)
+    if isinstance(tir_vars, list | tuple):
+        tir_vars = ShapeExpr(tir_vars)
+    handle_config = {} if handle_config is None else handle_config
+    if not set(handle_config.keys()).issubset(
+        {
+            "wait_scope",
+            "notify_scope",
+            "notify_scope_id",
+            "push_level",
+            "push_scope",
+            "push_scope_id",
+        }
+    ):
+        raise ValueError(
+            "handle_config only supports keys: 'wait_scope', 'notify_scope', "
+            "'notify_scope_id', 'push_level', 'push_scope', 'push_scope_id'"
+        )
+    in_dep_list = tvm.relax.Tuple(in_dep_list)
+    out_dep_list = tvm.relax.Tuple(out_dep_list)
+    inv_in_dep_list = tvm.relax.Tuple(inv_in_dep_list)
+
+    return _ffi_api.call_tir_device(  # type: ignore
         gvar,
         args,
-        inplace_indices,
         out_sinfo,
+        tile_num,
+        in_dep_list,
+        out_dep_list,
+        inv_in_dep_list,
+        job_id,
+        in_evt_list,
+        out_evt_list,
+        inv_in_evt_list,
+        in_extra_args_list,
+        out_extra_args_list,
+        inv_in_extra_args_list,
+        handle_config,
+        inplace_indices,
         tir_vars,
     )
+
+
+def alloc_event_tensor(
+    workspace: Expr,
+    shape: ShapeExpr | tuple[PrimExpr] | list[PrimExpr],
+    f_init: Callable | PrimFunc | PrimExprLike,
+) -> Expr:
+    """
+    Allocate an event tensor and initialize it.
+
+    Parameters
+    ----------
+    workspace : Expr
+        The workspace of the event tensor.
+    shape : Union[ShapeExpr, Tuple[PrimExpr], List[PrimExpr]]
+        The shape of the event tensor.
+    f_init : Union[Callable, PrimExprLike]
+        The function to initialize the event tensor. Takes indices as input and
+        returns the initial count at corresponding index.
+    """
+    if isinstance(shape, list | tuple):
+        shape = ShapeExpr(shape)
+    f_init, extra_args = trans_callable_to_primfunc(f_init, len(shape), 1, "int32")
+    return _ffi_api.alloc_event_tensor(workspace, shape, f_init, extra_args)
 
 
 def call_dps_packed(

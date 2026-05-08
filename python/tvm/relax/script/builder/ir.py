@@ -45,6 +45,7 @@ from tvm.relax.op import (
     acos,
     acosh,
     add,
+    alloc_event_tensor,
     arange,
     argmax,
     argmin,
@@ -68,6 +69,7 @@ from tvm.relax.op import (
     call_inplace_packed,
     call_pure_packed,
     call_tir,
+    call_tir_device,
     call_tir_inplace,
     call_tir_with_grad,
     ccl,
@@ -194,9 +196,7 @@ from tvm.relax.op import (
     zeros,
     zeros_like,
 )
-from tvm.relax.op import (
-    call_py_func as _call_py_func,
-)
+from tvm.relax.op import call_py_func as _call_py_func
 from tvm.relax.op.builtin import stop_lift_params
 from tvm.relax.struct_info import StructInfo
 from tvm.relax.utils import convert_to_expr, gen_call_tir_inputs
@@ -804,6 +804,7 @@ __all__ = [
     "acos",
     "acosh",
     "add",
+    "alloc_event_tensor",
     "arange",
     "arg",
     "argmax",
@@ -830,6 +831,7 @@ __all__ = [
     "call_pure_packed",
     "call_py_func",
     "call_tir",
+    "call_tir_device",
     "call_tir_inplace",
     "call_tir_with_grad",
     "ccl",

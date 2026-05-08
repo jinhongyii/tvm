@@ -564,7 +564,9 @@ class OperatorConverter:
             dims_expr = self.get_expr(shape_tensor.tensor_idx)
             dims_ndim = int(self.get_tensor_shape(shape_tensor)[0])
             dims_dtype = self.get_tensor_type_str(shape_tensor.tensor.Type())
-            dims_expr = self.bb.match_cast(dims_expr, relax.TensorStructInfo([dims_ndim], dims_dtype))
+            dims_expr = self.bb.match_cast(
+                dims_expr, relax.TensorStructInfo([dims_ndim], dims_dtype)
+            )
             dims_expr = self.bb.normalize(relax.op.astype(dims_expr, "int64"))
             shape_dataflow_var = self.bb.emit(relax.op.tensor_to_shape(dims_expr))
             shape_vars = [tirx.Var(f"{prefix}_{i}", "int64") for i in range(dims_ndim)]
@@ -902,7 +904,9 @@ class OperatorConverter:
         )
         pooled = self.bb.normalize(_op.reshape(pooled, data_shape))
         denom = relax.op.power(
-            relax.op.add(relax.const(bias, in_type), relax.op.multiply(relax.const(alpha, in_type), pooled)),
+            relax.op.add(
+                relax.const(bias, in_type), relax.op.multiply(relax.const(alpha, in_type), pooled)
+            ),
             relax.const(beta, in_type),
         )
         out = relax.op.divide(in_expr, denom)
@@ -995,7 +999,8 @@ class OperatorConverter:
                     # relax.op.arange currently expects scalar-like values here.
                     # Keep dynamic scalar RANGE explicit until frontend support is added.
                     raise tvm.error.OpNotImplemented(
-                        "TFLite RANGE with dynamic scalar inputs is not supported in Relax frontend yet."
+                        "TFLite RANGE with dynamic scalar inputs is not "
+                        "supported in Relax frontend yet."
                     )
             else:
                 value = self.get_tensor_value(tensor)
@@ -1007,7 +1012,7 @@ class OperatorConverter:
         start_value = get_scalar_value(start)
         limit_value = get_scalar_value(limit)
         delta_value = get_scalar_value(delta)
- 
+
         # out type inference
         if delta.tensor.Type() == TensorType.FLOAT32:
             out_type = self.get_tensor_type_str(delta.tensor.Type())
@@ -1464,7 +1469,7 @@ class OperatorConverter:
             rhs_expr = self.get_tensor_expr(rhs_tensor)
             lhs_expr = relax.op.add(lhs_expr, rhs_expr)
         return lhs_expr
-    
+
     def convert_cumsum(self, op):
         """Convert TFLite CUMSUM"""
         if self.is_quantized(op):
@@ -1477,7 +1482,7 @@ class OperatorConverter:
 
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 2, "input tensors length should be 2"
-        
+
         input_expr = self.get_tensor_expr(input_tensors[0])
 
         if self.has_expr(input_tensors[1].tensor_idx):
@@ -1498,7 +1503,7 @@ class OperatorConverter:
             raise tvm.error.OpNotImplemented(
                 "The TFLite to Relax converter does not support reverse CUMSUM operator yet."
             )
-        
+
         output_tensors = self.get_output_tensors(op)
         assert len(output_tensors) == 1, "output tensors length should be 1"
 
@@ -2516,9 +2521,7 @@ class OperatorConverter:
 
             outputs = []
             for i in range(num_splits):
-                start_val = relax.op.strided_slice(
-                    padded_cumsum, axes=[0], begin=[i], end=[i + 1]
-                )
+                start_val = relax.op.strided_slice(padded_cumsum, axes=[0], begin=[i], end=[i + 1])
                 end_val = relax.op.strided_slice(
                     padded_cumsum, axes=[0], begin=[i + 1], end=[i + 2]
                 )
@@ -2622,7 +2625,7 @@ class OperatorConverter:
                 raise tvm.error.OpNotImplemented(
                     "TFLite SEGMENT_SUM with runtime segment_ids is not supported, "
                     "because TFLite does not encode a reliable output segment count."
-            )
+                )
             segment_ids = self.get_tensor_value(segment_ids_tensor)
             if np.any(segment_ids < 0):
                 raise tvm.error.OpNotImplemented(
@@ -3582,10 +3585,9 @@ class OperatorConverter:
         padding = deconv_options.Padding()
         stride_h = deconv_options.StrideH()
         stride_w = deconv_options.StrideW()
-        assert padding in (
-            Padding.VALID,
-            Padding.SAME,
-        ), f"Padding format {padding} is not supported for operator TRANSPOSE_CONV"
+        assert padding in (Padding.VALID, Padding.SAME), (
+            f"Padding format {padding} is not supported for operator TRANSPOSE_CONV"
+        )
 
         # Data
         in_expr = self.get_expr(input_tensor.tensor_idx)
@@ -3782,7 +3784,7 @@ class OperatorConverter:
         dilations_tensor = input_tensors[1]
         padding_expr = self.get_tensor_expr(input_tensors[2])
 
-        # Runtime dilations bind tensor values to TIR Vars for symbolic 
+        # Runtime dilations bind tensor values to TIR Vars for symbolic
         # per-axis math.
         if self.has_expr(dilations_tensor.tensor_idx):
             dilations_expr = self.get_expr(dilations_tensor.tensor_idx)
@@ -4199,9 +4201,7 @@ class OperatorConverter:
 
         if soft_nms_sigma > 0.0:
             # Extract decayed scores from the processed data (score_index=0)
-            selected_scores = relax.op.strided_slice(
-                processed_data, axes=[1], begin=[0], end=[1]
-            )
+            selected_scores = relax.op.strided_slice(processed_data, axes=[1], begin=[0], end=[1])
             selected_scores = relax.op.squeeze(selected_scores, axis=[1])
             selected_scores = relax.op.strided_slice(
                 selected_scores, axes=[0], begin=[0], end=[max_output_size]
@@ -4349,7 +4349,14 @@ class OperatorConverter:
         # TFLite MATRIX_SET_DIAG only sets the main diagonal, so k1=0, k2=0
         out = relax.op.call_dps_packed(
             "topi.matrix_set_diag",
-            (input_expr, diagonal_expr, relax.const(0), relax.const(0), relax.const(False), relax.const(False)),
+            (
+                input_expr,
+                diagonal_expr,
+                relax.const(0),
+                relax.const(0),
+                relax.const(False),
+                relax.const(False),
+            ),
             out_sinfo=relax.TensorStructInfo(output_shape, output_dtype),
         )
         return out
@@ -4381,7 +4388,14 @@ class OperatorConverter:
         # TFLite MATRIX_DIAG only sets the main diagonal, so k1=0, k2=0
         out = relax.op.call_dps_packed(
             "topi.matrix_set_diag",
-            (zeros_expr, diagonal_expr, relax.const(0), relax.const(0), relax.const(False), relax.const(False)),
+            (
+                zeros_expr,
+                diagonal_expr,
+                relax.const(0),
+                relax.const(0),
+                relax.const(False),
+                relax.const(False),
+            ),
             out_sinfo=relax.TensorStructInfo(output_shape, output_dtype),
         )
         return out
@@ -4490,9 +4504,7 @@ class OperatorConverter:
 
         type_str = self.get_tensor_type_str(tensor.tensor.Type())
         value = self.get_tensor_value_or_prefetched(tensor, is_sparse)
-        return self.exp_tab.new_const(
-            value, dtype=type_str, source_name=tensor.tensor.Name()
-        )
+        return self.exp_tab.new_const(value, dtype=type_str, source_name=tensor.tensor.Name())
 
     def get_tensor_shape(self, tensor_wrapper):
         """Returns tensor shape. Infers shape if the shape is empty."""

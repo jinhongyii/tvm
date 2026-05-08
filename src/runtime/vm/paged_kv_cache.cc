@@ -39,6 +39,7 @@
 #include "attn_backend.h"
 #include "attn_utils.h"
 #include "kv_state.h"
+#include "megakernel_utils.h"
 
 namespace tvm {
 namespace runtime {
@@ -181,6 +182,8 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
              todo: support multiple recver. */
   bool transfer_kv_;
   bool page_to_page_transfer_kv_;
+  bool use_mega_kernel_;
+  std::string model_name_;
   /*! \brief The auxiliary data manager for attention. */
   std::unique_ptr<PagedKVCacheAuxDataManager> aux_data_manager_;
 
@@ -194,8 +197,20 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
   std::vector<Tensor> temp_int_attn_workspace_;
   std::vector<Tensor> temp_int_pinned_attn_workspace_;
   Tensor temp_float_attn_workspace_;
+  ffi::Array<ffi::Any> attn_plan_results_;
+  std::vector<std::vector<int>> intermediate_inverse_info_;
+  int64_t attn_task_num_;
 
   std::vector<ffi::Any> retrieve_ret_;
+
+  // Megakernel event tensor cache
+  std::vector<std::unordered_map<int, std::vector<HostMemoryVector>>> event_tensor_cache_;
+
+  // Megakernel execution queue cache
+  std::vector<std::unordered_map<int, Tensor>> exec_queue_cache_;
+  Tensor exec_queue_device_buf_;
+  Tensor exec_queue_host_buf_;
+  ffi::Array<ffi::Array<Tensor>> exec_queue_dynamic_;
 
   //-------------------------------------------
   // Below are the auxiliary data structure on CPU.
@@ -226,6 +241,9 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
   HostMemoryVector kv_transfer_page_to_page_local_position_map_host_;
   HostMemoryVector kv_transfer_page_to_page_remote_position_map_host_;
   HostMemoryVector kv_transfer_page_to_page_recver_id_host_;
+  // Host memory tensor for megakernel
+  HostMemoryVector inverse_indptr_host_;
+  HostMemoryVector inverse_indices_host_;
   //-------------------------------------------
   // For efficient memory management, the actual sizes of the arrays
   // above are over allocated.
@@ -256,6 +274,11 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
   std::vector<Tensor> k_rope_pos_offset_sliding_window_view_;
   std::vector<Tensor> tree_attn_mask_view_;
   std::vector<Tensor> tree_attn_mn_indptr_view_;
+  // Device views for megakernel
+  Tensor inverse_indptr_view_;
+  Tensor inverse_indices_view_;
+  // Event Tensor device views
+  Tensor etensor_workspace_view_;
 
   ffi::Optional<ffi::Function> f_transpose_append_mha_;
   ffi::Optional<ffi::Function> f_transpose_append_mla_;
@@ -292,8 +315,9 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
       int64_t v_head_dim, std::vector<AttnKind> attn_kinds, int64_t reserved_num_seqs,
       int64_t num_total_pages, int64_t prefill_chunk_size, bool support_sliding_window,
       RoPEMode rope_mode, double rotary_scale, double rotary_theta,
-      ffi::Optional<Tensor> rope_ext_factors, bool enable_kv_transfer, DLDataType dtype,
-      Device device, ffi::Optional<ffi::Function> f_transpose_append_mha,
+      ffi::Optional<Tensor> rope_ext_factors, bool enable_kv_transfer, bool may_use_megakernel,
+      std::string model_name, DLDataType dtype, Device device,
+      ffi::Optional<ffi::Function> f_transpose_append_mha,
       ffi::Optional<ffi::Function> f_transpose_append_mla, ffi::Function f_compact_copy,
       std::unique_ptr<RaggedPrefillFunc> f_attention_prefill_ragged,
       std::unique_ptr<PagedPrefillFunc> f_attention_prefill,
@@ -446,6 +470,60 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
     commit_copy_dst_pos_in_page_table_host_ =
         HostMemoryVector(std::min(kTreeAttnMaxTreeSize * reserved_num_seqs, prefill_chunk_size),
                          dtype_aux_, preferred_host_device);
+    // alloction for megakernel
+    inverse_indptr_host_ =
+        HostMemoryVector(megakernel::kMaxTotalNumWorks, dtype_aux_, preferred_host_device);
+    inverse_indices_host_ =
+        HostMemoryVector(megakernel::kMaxTotalNumWorks, dtype_aux_, preferred_host_device);
+    // Event tensor allocation
+    const auto f_get_config =
+        tvm::ffi::Function::GetGlobalRequired("tirx.megakernel.get_model_config");
+    auto config = f_get_config(model_name).cast<ffi::Map<ffi::String, ffi::Any>>();
+
+    int tp_size = config["NUM_ATTENTION_HEADS"].cast<int>() / num_qo_heads;
+    TVM_FFI_ICHECK_EQ(tp_size, config["NUM_KEY_VALUE_HEADS"].cast<int>() / num_kv_heads);
+    int split_o_project = config["SPLIT_O_PROJECT_DICT"].cast<ffi::Map<int, int>>()[tp_size];
+    TVM_FFI_ICHECK_NE(split_o_project, -1);
+    TVM_FFI_ICHECK_EQ(qk_head_dim, config["HEAD_DIM"].cast<int>());
+    TVM_FFI_ICHECK_EQ(v_head_dim, config["HEAD_DIM"].cast<int>());
+    model_name_ = model_name;
+
+    retrieve_ret_.reserve(11);
+    Tensor etensor_workspace_host = Tensor::Empty({megakernel::kEtensorWorkspaceSize},
+                                                  DataType::Int(32), preferred_host_device);
+    etensor_workspace_view_ =
+        Tensor::Empty({megakernel::kEtensorWorkspaceSize}, DataType::Int(32), device);
+    int32_t* etensor_workspace_host_data = static_cast<int32_t*>(etensor_workspace_host->data);
+    memset(etensor_workspace_host_data, 0, megakernel::kEtensorWorkspaceSize * sizeof(int32_t));
+    DLTensor etensor_workspace_device_dl = *etensor_workspace_view_.operator->();
+    Tensor::CopyFromTo(etensor_workspace_host.operator->(), &etensor_workspace_device_dl);
+
+    // Cache static execution queue
+    int max_exec_queue_init_size = reserved_num_seqs;
+    exec_queue_cache_.resize(max_exec_queue_init_size + 1);
+    for (int bsz = 1; bsz <= max_exec_queue_init_size; ++bsz) {
+      for (int rate = 1; rate <= 8; ++rate) {
+        int attn_task_num = bsz * num_kv_heads * rate;
+        exec_queue_cache_[bsz][attn_task_num] = megakernel::GenerateExecQueueStatic(
+            bsz, attn_task_num, tp_size, model_name, device, preferred_host_device);
+      }
+    }
+
+    std::function<Tensor(ffi::Shape)> f_empty;
+    if (tp_size == 1) {
+      f_empty = [this](ffi::Shape shape) { return Tensor::Empty(shape, dtype_aux_, device_); };
+    } else {
+      const ffi::Function f_nvshmem_empty =
+          tvm::ffi::Function::GetGlobalRequired("runtime.disco.nvshmem.empty");
+      f_empty = [f_nvshmem_empty, this](ffi::Shape shape) {
+        return f_nvshmem_empty(shape, dtype_aux_, device_).cast<Tensor>();
+      };
+    }
+    exec_queue_device_buf_ =
+        f_empty({num_layers * (megakernel::kDyanmicTileSchedulerMaxTasks + 4)});
+    exec_queue_host_buf_ =
+        Tensor::Empty({num_layers * (megakernel::kDyanmicTileSchedulerMaxTasks + 4)},
+                      DataType::Int(32), preferred_host_device);
 
     for (int d = 0; d < kPagedKVCacheMaxBlockDepth; ++d) {
       if (NeedKernelBeginForward()) {
@@ -512,7 +590,7 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
         device_.device_type == DLDeviceType::kDLCPU) {
       aux_data_manager_ = std::make_unique<CachedPagedKVCacheAuxDataManager>(
           reserved_num_seqs, num_total_pages, prefill_chunk_size, dtype_aux_, device,
-          preferred_host_device, copy_stream_);
+          preferred_host_device, copy_stream_, /*use_nvshmem=*/may_use_megakernel && tp_size > 1);
     } else {
       aux_data_manager_ = std::make_unique<PlainPagedKVCacheAuxDataManager>(
           reserved_num_seqs, num_total_pages, prefill_chunk_size, dtype_aux_, device,
@@ -861,7 +939,8 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
   /************** Attention **************/
 
   void BeginForward(const ffi::Shape& seq_ids, const ffi::Shape& append_lengths,
-                    const ffi::Optional<ffi::Shape>& opt_token_tree_parent_ptr) final {
+                    const ffi::Optional<ffi::Shape>& opt_token_tree_parent_ptr,
+                    bool use_megakernel) final {
     // Note: MLA does not supported tree attention for now.
     if (attn_kinds_[0] == AttnKind::kMLA) {
       TVM_FFI_ICHECK(!opt_token_tree_parent_ptr.defined())
@@ -874,6 +953,7 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
     cur_batch_size_ = seq_ids.size();
     cur_seq_ids_ = seq_ids;
     cur_append_lengths_ = append_lengths;
+    use_mega_kernel_ = use_megakernel;
 
     // - Collect sequence/block/page information for attention.
     std::vector<Sequence*> sequences;
@@ -1006,6 +1086,7 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
         const auto& [block_id, chunk_append_length] = chunked_block_ids_arr[d][i];
         qo_indptr_h.push_back(qo_indptr_h.back() + chunk_append_length);
         if (block_id == -1) {
+          TVM_FFI_THROW(InternalError) << "block id shouldn't be -1";
           page_indptr_h.push_back(page_indptr_h.back());
           page_indptr_sliding_window_h.push_back(page_indptr_sliding_window_h.back());
           last_page_len_h.push_back(0);
@@ -1018,21 +1099,18 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
             // Blocks not at maximum depth
             const Block& block = global_block_pool_[block_id];
             page_indptr_h.push_back(page_indptr_h.back() + block.page_ids.size());
-            for (int32_t page_id : block.page_ids) {
-              page_indices_h.push_back(page_id);
-              // Do the same for page_indices_sliding_window
-            }
+            page_indices_h.push_back_vec(block.page_ids);
 
             // For sliding window, the first page and last page will both be partially used
-            page_indptr_sliding_window_h.push_back(
-                page_indptr_sliding_window_h.back() +
-                std::min(static_cast<int32_t>(block.page_ids.size()),
-                         static_cast<int32_t>(1024 / page_size_ +
-                                              (block.seq_length % page_size_ ? 1 : 0))));
-            for (int i = page_indices_h.size() - page_indptr_sliding_window_h.back();
-                 i < static_cast<int32_t>(page_indices_h.size()); i++) {
-              page_indices_sliding_window_h.push_back(page_indices_h[i]);
-            }
+            // page_indptr_sliding_window_h.push_back(
+            //     page_indptr_sliding_window_h.back() +
+            //     std::min(static_cast<int32_t>(block.page_ids.size()),
+            //              static_cast<int32_t>(1024 / page_size_ +
+            //                                   (block.seq_length % page_size_ ? 1 : 0))));
+            // for (int i = page_indices_h.size() - page_indptr_sliding_window_h.back();
+            //      i < static_cast<int32_t>(page_indices_h.size()); i++) {
+            //   page_indices_sliding_window_h.push_back(page_indices_h[i]);
+            // }
             // set up the page indices properly by choosing the last (sliding_window_size /
             // page_size_) pages (at most)
             last_page_len_h.push_back(
@@ -1041,24 +1119,26 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
                     : (block.seq_length - block.sink_length + block.sliding_window_offset - 1) %
                               page_size_ +
                           1);
-            if (support_layer_sliding_window_) {
-              if (block.seq_length < 1024) {
-                sliding_window_offset_h.push_back(0);
-              } else {
-                sliding_window_offset_h.push_back(block.seq_length % page_size_);
-              }
-            } else {
-              sliding_window_offset_h.push_back(block.sliding_window_offset);
-            }
-            sink_size_h.push_back(block.sink_length);
+            // if (support_layer_sliding_window_) {
+            //   if (block.seq_length < 1024) {
+            //     sliding_window_offset_h.push_back(0);
+            //   } else {
+            //     sliding_window_offset_h.push_back(block.seq_length % page_size_);
+            //   }
+            // } else {
+            //   sliding_window_offset_h.push_back(block.sliding_window_offset);
+            // }
+            // sink_size_h.push_back(block.sink_length);
             k_rope_pos_offset_h.push_back(block.start_pos);
 
             // If sliding window, we need to calculate the positional offset
-            if (support_layer_sliding_window_) {
-              k_rope_pos_offset_sliding_window_h.push_back(
-                  std::max(0, block.start_pos + block.seq_length - 1024));
-            }
+            // if (support_layer_sliding_window_) {
+            //   k_rope_pos_offset_sliding_window_h.push_back(
+            //       std::max(0, block.start_pos + block.seq_length - 1024));
+            // }
           } else {
+            TVM_FFI_THROW(InternalError)
+                << "depth shouldn't exceed " << kPagedKVCacheMaxBlockDepth - 1;
             // Blocks at maximum depth
             const Block& block = global_block_pool_[block_id];
             int32_t num_pages = static_cast<int32_t>(block.page_ids.size());
@@ -1197,6 +1277,80 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
         sequences[i]->kv_transfer_metadata.local_position_map.clear();
       }
     }
+
+    if (!use_megakernel) {
+      return;
+    }
+    {
+      NVTXScopedRange range("Init event tensors on host");
+      TVM_FFI_ICHECK_EQ(num_depths_, 1) << "Megakernel only supports depth 1 for now.";
+
+      // 1. Run attention plan to get required tensors for attention.
+      // Some of which are needed for event tensor initialization,
+      // so we need to run the plan before initializing the event tensors
+      // and transferring the event tensors to device.
+      ffi::Function f_attn_plan =
+          ffi::Function::GetGlobalRequired("flashinfer.batch_paged_attention_plan");
+      {
+        NVTXScopedRange range("Run attention plan");
+        attn_plan_results_ =
+            f_attn_plan(temp_float_attn_workspace_, temp_int_attn_workspace_[0],
+                        temp_int_pinned_attn_workspace_[0],
+                        qo_indptr_on_depths_host_[0].as_tensor(),
+                        page_indptr_on_depths_host_[0].as_tensor(), kv_len_arr_host_.as_tensor(),
+                        cur_batch_size_, num_qo_heads_, num_kv_heads_, v_head_dim_, false)
+                .cast<ffi::Array<ffi::Any>>();
+        TVM_FFI_ICHECK_EQ(attn_plan_results_.size(), 8);
+      }
+      // retrieve plan information
+      auto task = attn_plan_results_[3].cast<ffi::Array<Tensor>>();
+      TVM_FFI_ICHECK_EQ(task.size(), 13);
+      Tensor work_indptr_host = task[12];
+      const int32_t* work_indptr_data = static_cast<int32_t*>(work_indptr_host->data) +
+                                        work_indptr_host->byte_offset / sizeof(int32_t);
+      attn_task_num_ = static_cast<int64_t>(
+          work_indptr_data[megakernel::kNumWarpgroupPerBlock * megakernel::kNumSM]);
+      Tensor q_indptr_host = task[10];
+      Tensor kv_head_idx_host = task[11];
+      const int32_t* kv_head_idx_data = static_cast<int32_t*>(kv_head_idx_host->data) +
+                                        kv_head_idx_host->byte_offset / sizeof(int32_t);
+      const int32_t* q_indptr_data =
+          static_cast<int32_t*>(q_indptr_host->data) + q_indptr_host->byte_offset / sizeof(int32_t);
+      bool split_kv = attn_task_num_ > num_kv_heads_ * cur_batch_size_;
+      // generate the inverse map for attention task
+      intermediate_inverse_info_.clear();
+      intermediate_inverse_info_.resize(cur_batch_size_ * num_kv_heads_);
+      for (int i = 0; i < attn_task_num_; ++i) {
+        int batch_idx = q_indptr_data[i];
+        int kv_idx = kv_head_idx_data[i];
+        intermediate_inverse_info_[kv_idx * cur_batch_size_ + batch_idx].push_back(
+            (i / megakernel::kNumWarpgroupPerBlock) % megakernel::kNumSM);
+      }
+      for (int i = attn_task_num_; i < ceildiv(attn_task_num_, megakernel::kNumWarpgroupPerBlock) *
+                                           megakernel::kNumWarpgroupPerBlock;
+           ++i) {
+        intermediate_inverse_info_[(i - attn_task_num_) % (cur_batch_size_ * num_kv_heads_)]
+            .push_back(i / megakernel::kNumWarpgroupPerBlock);
+      }
+      inverse_indptr_host_.resize(megakernel::kMaxTotalNumWorks);
+      inverse_indices_host_.resize(megakernel::kMaxTotalNumWorks);
+      inverse_indptr_host_.fill(0);
+      inverse_indices_host_.fill(0);
+      for (int i = 0; i < cur_batch_size_ * num_kv_heads_; ++i) {
+        inverse_indptr_host_.set(i + 1,
+                                 inverse_indptr_host_[i] + intermediate_inverse_info_[i].size());
+        for (int j = 0; j < static_cast<int32_t>(intermediate_inverse_info_[i].size()); ++j) {
+          inverse_indices_host_.set(inverse_indptr_host_[i] + j, intermediate_inverse_info_[i][j]);
+        }
+      }
+      TVM_FFI_ICHECK_EQ(inverse_indptr_host_[cur_batch_size_ * num_kv_heads_],
+                        ceildiv(attn_task_num_, megakernel::kNumWarpgroupPerBlock) *
+                            megakernel::kNumWarpgroupPerBlock);
+    }
+
+    // 3. Sync the copy stream and the compute stream.
+    // Host-side tensors are synced to device.
+    ComputeStreamWaitForCopyStream();
   }
 
   void EndForward() final {
@@ -1209,7 +1363,8 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
     // No CPU to GPU copy is needed.
     // Essentially we
     // (step 1.) redirect the preparation to BeginForward.
-    BeginForward({seq_id}, {append_length}, /*opt_token_tree_parent_ptr=*/std::nullopt);
+    BeginForward({seq_id}, {append_length}, /*opt_token_tree_parent_ptr=*/std::nullopt,
+                 /*use_megakernel=*/false);
     // (step 2.) fetch the append_position_map, compress and return.
     // Compression format: [n, begin_1, length_1, begin_2, length_2, ..., begin_n, length_n]
     // The compressed format will be decompressed to:
@@ -1717,6 +1872,79 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
     TVM_FFI_ICHECK(false) << "DebugSetKV for PageAttentionKVCache not implemented yet.";
   }
 
+  ffi::Array<ffi::Any> RetrieveTensor(size_t num_layers) {
+    NVTXScopedRange range("RetrieveTensor");
+    TVM_FFI_ICHECK_EQ(num_depths_, 1) << "Only 1 depth is supported for RetrieveTensor";
+    TVM_FFI_ICHECK_GT(page_indptr_on_depths_view_.size(), 0)
+        << "Only 1 depth is supported for RetrieveTensor";
+    TVM_FFI_ICHECK_GT(page_indices_on_depths_view_.size(), 0)
+        << "Only 1 depth is supported for RetrieveTensor";
+    TVM_FFI_ICHECK_GT(length_info_on_depths_view_.size(), 0)
+        << "Only 1 depth is supported for RetrieveTensor";
+    TVM_FFI_ICHECK(page_indptr_on_depths_view_[0].defined())
+        << "page_indptr_on_depths_view_[0] is not defined";
+    TVM_FFI_ICHECK(page_indices_on_depths_view_[0].defined())
+        << "page_indices_on_depths_view_[0] is not defined";
+    TVM_FFI_ICHECK(length_info_on_depths_view_[0].defined())
+        << "length_info_on_depths_view_[0] is not defined";
+    TVM_FFI_ICHECK(append_position_map_view_.defined())
+        << "append_position_map_view_ is not defined";
+    TVM_FFI_ICHECK(q_rope_position_map_view_.defined())
+        << "q_rope_position_map_view_ is not defined";
+    TVM_FFI_ICHECK_GT(attn_task_num_, 0) << "attn_task_num_ must be greater than 0";
+    retrieve_ret_.clear();
+    retrieve_ret_.push_back(ffi::Array<Tensor>(pages_));
+    retrieve_ret_.push_back(page_indptr_on_depths_view_[0]);
+    retrieve_ret_.push_back(page_indices_on_depths_view_[0]);
+    retrieve_ret_.push_back(length_info_on_depths_view_[0]);
+    retrieve_ret_.push_back(append_position_map_view_);
+    retrieve_ret_.push_back(q_rope_position_map_view_);
+    retrieve_ret_.push_back(attn_plan_results_);
+    retrieve_ret_.push_back(inverse_indptr_view_);
+    retrieve_ret_.push_back(inverse_indices_view_);
+    retrieve_ret_.push_back(etensor_workspace_view_);
+    retrieve_ret_.push_back(attn_task_num_);
+    return retrieve_ret_;
+  }
+
+  ffi::Any GetExecQueue(int batch_size, int attn_task_num, int dynamic_layer_id) {
+    NVTXScopedRange range("GetExecQueue");
+    if (dynamic_layer_id >= 0) {
+      // Generate the dynamic execution queue.
+      if (dynamic_layer_id == 0) {
+        const auto f_get_config =
+            tvm::ffi::Function::GetGlobalRequired("tirx.megakernel.get_model_config");
+        auto config = f_get_config(model_name_).cast<ffi::Map<ffi::String, ffi::Any>>();
+        int tp_size = config["NUM_ATTENTION_HEADS"].cast<int>() / num_qo_heads_;
+        exec_queue_dynamic_ =
+            megakernel::GenerateExecQueueDynamic(exec_queue_device_buf_, exec_queue_host_buf_,
+                                                 tp_size, model_name_, num_layers_, copy_stream_);
+      }
+      ffi::Array<Tensor> exec_queue = exec_queue_dynamic_[dynamic_layer_id];
+      return exec_queue;
+    }
+
+    // Try to get the static execution queue from the cache.
+    if (batch_size < static_cast<int>(exec_queue_cache_.size())) {
+      auto it = exec_queue_cache_[batch_size].find(attn_task_num);
+      if (it != exec_queue_cache_[batch_size].end()) {
+        return it->second;
+      }
+    } else {
+      exec_queue_cache_.resize(batch_size + 1);
+    }
+    // Generate the static execution queue.
+    const auto f_get_config =
+        tvm::ffi::Function::GetGlobalRequired("tirx.megakernel.get_model_config");
+    auto config = f_get_config(model_name_).cast<ffi::Map<ffi::String, ffi::Any>>();
+    int tp_size = config["NUM_ATTENTION_HEADS"].cast<int>() / num_qo_heads_;
+    Device preferred_host_device = GetPreferredHostDevice(device_);
+    Tensor exec_queue = megakernel::GenerateExecQueueStatic(
+        batch_size, attn_task_num, tp_size, model_name_, device_, preferred_host_device);
+    exec_queue_cache_[batch_size][attn_task_num] = exec_queue;
+    return exec_queue;
+  }
+
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("relax.vm.PagedAttentionKVCache", PagedAttentionKVCacheObj,
                                     AttentionKVCacheObj);
 
@@ -2011,7 +2239,7 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
 
   /*! \brief Invoke the "begin forward" functions of underlying kernels. */
   void KernelBeginForward() {
-    if (!NeedKernelBeginForward()) {
+    if (!NeedKernelBeginForward() || use_mega_kernel_) {
       return;
     }
 
@@ -2373,8 +2601,8 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
     for (int d = 0; d < num_depths_; ++d) {
       int num_seq_on_layer = static_cast<int>(qo_indptr_on_depths_host_[d].size()) - 1;
       TVM_FFI_ICHECK_EQ(last_page_len_on_depths_host_[d].size(), num_seq_on_layer);
-      TVM_FFI_ICHECK_EQ(sliding_window_offset_on_depths_host_[d].size(), num_seq_on_layer);
-      TVM_FFI_ICHECK_EQ(sink_size_on_depths_host_[d].size(), num_seq_on_layer);
+      // TVM_FFI_ICHECK_EQ(sliding_window_offset_on_depths_host_[d].size(), num_seq_on_layer);
+      // TVM_FFI_ICHECK_EQ(sink_size_on_depths_host_[d].size(), num_seq_on_layer);
       if (!support_sliding_window_) {
         // Sliding window is not enabled, so we first copy "last_page_len".
         length_info_on_depths_view_[d] =
@@ -2453,8 +2681,33 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
     merged_attn_lse_view_ = merged_attn_lse_device_.CreateView({total_append_length, num_qo_heads_},
                                                                merged_attn_lse_device_->dtype);
 
+    // Event tensor transfer.
+    const auto f_get_config =
+        tvm::ffi::Function::GetGlobalRequired("tirx.megakernel.get_model_config");
+    auto config = f_get_config(model_name_).cast<ffi::Map<ffi::String, ffi::Any>>();
+    int tp_size = config["NUM_ATTENTION_HEADS"].cast<int>() / num_qo_heads_;
+    if (use_mega_kernel_) {
+      inverse_indptr_view_ = aux_data_manager_->CopyInverseIndptrAsync(&inverse_indptr_host_);
+      inverse_indices_view_ = aux_data_manager_->CopyInverseIndicesAsync(&inverse_indices_host_);
+    }
+
     // - Commit the copy.
+    if (use_mega_kernel_ && tp_size > 1) {
+      // NVSHMEM is used
+      ffi::Function f_nvshmem_barrier =
+          ffi::Function::GetGlobalRequired("runtime.disco.nvshmem.barrier_all_on_stream");
+      f_nvshmem_barrier(copy_stream_);
+    }
     aux_data_manager_->CommitAttnAuxDataCopy();
+    if (use_mega_kernel_ && tp_size > 1) {
+      // NVSHMEM is used
+      ffi::Function f_nvshmem_barrier =
+          ffi::Function::GetGlobalRequired("runtime.disco.nvshmem.barrier_all_on_stream");
+      f_nvshmem_barrier(copy_stream_);
+      auto f_sync_stream = tvm::ffi::Function::GetGlobalRequired("runtime.Device_StreamSync");
+      DiscoWorker* disco_worker = ThreadLocalDiscoWorker::Get()->worker;
+      f_sync_stream(disco_worker->default_device, reinterpret_cast<int64_t>(copy_stream_));
+    }
     // - Reset the dirty flag to false.
     dirty_aux_data_device_ = false;
   }
@@ -2466,108 +2719,126 @@ class PagedAttentionKVCacheObj : public AttentionKVCacheObj {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def_packed(
-      "vm.builtin.paged_attention_kv_cache_create", [](ffi::PackedArgs args, ffi::Any* rv) {
-        // Todo: cuda graph arg
-        TVM_FFI_ICHECK(args.size() == 28 || args.size() == 29)
-            << "Invalid number of KV cache constructor args: " << args.size();
-        ffi::Shape cache_config = args[0].cast<ffi::Shape>();
-        ffi::Shape layer_indptr_tuple = args[1].cast<ffi::Shape>();
-        int num_groups = 1;
-        int group_id = 0;
-        if (DiscoWorker* disco_worker = ThreadLocalDiscoWorker::Get()->worker) {
-          // In the Disco worker thread
-          num_groups = disco_worker->num_groups;
-          group_id = disco_worker->worker_id / (disco_worker->num_workers / num_groups);
-        }
-        TVM_FFI_ICHECK_EQ(layer_indptr_tuple.size(), num_groups + 1);
-        int64_t num_layers = layer_indptr_tuple[group_id + 1] - layer_indptr_tuple[group_id];
-        int64_t layer_id_begin_offset = layer_indptr_tuple[group_id];
-        int64_t layer_id_end_offset = layer_indptr_tuple[group_id + 1];
-        int64_t num_qo_heads = args[2].cast<int64_t>();
-        int64_t num_kv_heads = args[3].cast<int64_t>();
-        int64_t qk_head_dim = args[4].cast<int64_t>();
-        int64_t v_head_dim = args[5].cast<int64_t>();
-        ffi::Shape attn_kinds = args[6].cast<ffi::Shape>();
-        bool enable_kv_transfer = args[7].cast<bool>();
-        int rope_mode = args[8].cast<int>();
-        double rotary_scale = args[9].cast<double>();
-        double rotary_theta = args[10].cast<double>();
-        ffi::Optional<Tensor> rope_ext_factors = std::nullopt;  // args[11]
-        Tensor init = args[12].cast<Tensor>();
-        ffi::Optional<ffi::Function> f_transpose_append_mha = std::nullopt;  // args[13]
-        ffi::Optional<ffi::Function> f_transpose_append_mla = std::nullopt;  // args[14]
-        std::unique_ptr<RaggedPrefillFunc> f_attention_prefill_ragged =
-            ConvertRaggedPrefillFunc(args[15].cast<ffi::Array<ffi::Any>>(), AttnKind::kMHA);
-        std::unique_ptr<PagedPrefillFunc> f_attention_prefill =
-            ConvertPagedPrefillFunc(args[16].cast<ffi::Array<ffi::Any>>(), AttnKind::kMHA);
-        std::unique_ptr<PagedDecodeFunc> f_attention_decode =
-            ConvertPagedDecodeFunc(args[17].cast<ffi::Array<ffi::Any>>(), AttnKind::kMHA);
-        std::unique_ptr<PagedPrefillFunc> f_attention_prefill_sliding_window =
-            ConvertPagedPrefillFunc(args[18].cast<ffi::Array<ffi::Any>>(), AttnKind::kMHA);
-        std::unique_ptr<PagedDecodeFunc> f_attention_decode_sliding_window =
-            ConvertPagedDecodeFunc(args[19].cast<ffi::Array<ffi::Any>>(), AttnKind::kMHA);
-        std::unique_ptr<PagedPrefillTreeMaskFunc> f_attention_prefill_with_tree_mask_paged_kv =
-            ConvertPagedPrefillTreeMaskFunc(args[20].cast<ffi::Array<ffi::Any>>(), AttnKind::kMHA);
-        std::unique_ptr<RaggedPrefillTreeMaskFunc> f_attention_prefill_with_tree_mask =
-            ConvertRaggedPrefillTreeMaskFunc(args[21].cast<ffi::Array<ffi::Any>>(), AttnKind::kMHA);
-        std::unique_ptr<PagedPrefillFunc> f_mla_prefill =
-            ConvertPagedPrefillFunc(args[22].cast<ffi::Array<ffi::Any>>(), AttnKind::kMLA);
-        ffi::Array<ffi::Function> f_merge_inplace = args[23].cast<ffi::Array<ffi::Function>>();
-        ffi::Function f_split_rotary = args[24].cast<ffi::Function>();
-        ffi::Function f_copy_single_page = args[25].cast<ffi::Function>();
-        ffi::Function f_debug_get_kv = args[26].cast<ffi::Function>();
-        ffi::Function f_compact_copy = args[27].cast<ffi::Function>();
+  refl::GlobalDef()
+      .def_packed(
+          "vm.builtin.paged_attention_kv_cache_create",
+          [](ffi::PackedArgs args, ffi::Any* rv) {
+            // Todo: cuda graph arg
+            TVM_FFI_ICHECK(args.size() == 28 || args.size() == 29)
+                << "Invalid number of KV cache constructor args: " << args.size();
+            ffi::Shape cache_config = args[0].cast<ffi::Shape>();
+            ffi::Shape layer_indptr_tuple = args[1].cast<ffi::Shape>();
+            int num_groups = 1;
+            int group_id = 0;
+            if (DiscoWorker* disco_worker = ThreadLocalDiscoWorker::Get()->worker) {
+              // In the Disco worker thread
+              num_groups = disco_worker->num_groups;
+              group_id = disco_worker->worker_id / (disco_worker->num_workers / num_groups);
+            }
+            TVM_FFI_ICHECK_EQ(layer_indptr_tuple.size(), num_groups + 1);
+            int64_t num_layers = layer_indptr_tuple[group_id + 1] - layer_indptr_tuple[group_id];
+            int64_t layer_id_begin_offset = layer_indptr_tuple[group_id];
+            int64_t layer_id_end_offset = layer_indptr_tuple[group_id + 1];
+            int64_t num_qo_heads = args[2].cast<int64_t>();
+            int64_t num_kv_heads = args[3].cast<int64_t>();
+            int64_t qk_head_dim = args[4].cast<int64_t>();
+            int64_t v_head_dim = args[5].cast<int64_t>();
+            ffi::Shape attn_kinds = args[6].cast<ffi::Shape>();
+            bool enable_kv_transfer = args[7].cast<bool>();
+            int rope_mode = args[8].cast<int>();
+            double rotary_scale = args[9].cast<double>();
+            double rotary_theta = args[10].cast<double>();
+            ffi::Optional<Tensor> rope_ext_factors = std::nullopt;  // args[11]
+            Tensor init = args[12].cast<Tensor>();
+            ffi::Optional<ffi::Function> f_transpose_append_mha = std::nullopt;  // args[13]
+            ffi::Optional<ffi::Function> f_transpose_append_mla = std::nullopt;  // args[14]
+            std::unique_ptr<RaggedPrefillFunc> f_attention_prefill_ragged =
+                ConvertRaggedPrefillFunc(args[15].cast<ffi::Array<ffi::Any>>(), AttnKind::kMHA);
+            std::unique_ptr<PagedPrefillFunc> f_attention_prefill =
+                ConvertPagedPrefillFunc(args[16].cast<ffi::Array<ffi::Any>>(), AttnKind::kMHA);
+            std::unique_ptr<PagedDecodeFunc> f_attention_decode =
+                ConvertPagedDecodeFunc(args[17].cast<ffi::Array<ffi::Any>>(), AttnKind::kMHA);
+            std::unique_ptr<PagedPrefillFunc> f_attention_prefill_sliding_window =
+                ConvertPagedPrefillFunc(args[18].cast<ffi::Array<ffi::Any>>(), AttnKind::kMHA);
+            std::unique_ptr<PagedDecodeFunc> f_attention_decode_sliding_window =
+                ConvertPagedDecodeFunc(args[19].cast<ffi::Array<ffi::Any>>(), AttnKind::kMHA);
+            std::unique_ptr<PagedPrefillTreeMaskFunc> f_attention_prefill_with_tree_mask_paged_kv =
+                ConvertPagedPrefillTreeMaskFunc(args[20].cast<ffi::Array<ffi::Any>>(),
+                                                AttnKind::kMHA);
+            std::unique_ptr<RaggedPrefillTreeMaskFunc> f_attention_prefill_with_tree_mask =
+                ConvertRaggedPrefillTreeMaskFunc(args[21].cast<ffi::Array<ffi::Any>>(),
+                                                 AttnKind::kMHA);
+            std::unique_ptr<PagedPrefillFunc> f_mla_prefill =
+                ConvertPagedPrefillFunc(args[22].cast<ffi::Array<ffi::Any>>(), AttnKind::kMLA);
+            ffi::Array<ffi::Function> f_merge_inplace = args[23].cast<ffi::Array<ffi::Function>>();
+            ffi::Function f_split_rotary = args[24].cast<ffi::Function>();
+            ffi::Function f_copy_single_page = args[25].cast<ffi::Function>();
+            ffi::Function f_debug_get_kv = args[26].cast<ffi::Function>();
+            ffi::Function f_compact_copy = args[27].cast<ffi::Function>();
 
-        if (auto opt_nd = args[11].as<Tensor>()) {
-          rope_ext_factors = opt_nd.value();
-        }
-        auto f_convert_optional_packed_func = [&args](int arg_idx) -> ffi::Optional<ffi::Function> {
-          if (auto opt_func = args[arg_idx].as<ffi::Function>()) {
-            return opt_func.value();
-          }
-          return std::nullopt;
-        };
-        f_transpose_append_mha = f_convert_optional_packed_func(13);
-        f_transpose_append_mla = f_convert_optional_packed_func(14);
-        TVM_FFI_ICHECK(!f_merge_inplace.empty()) << "Merge inplace function is not defined.";
+            if (auto opt_nd = args[11].as<Tensor>()) {
+              rope_ext_factors = opt_nd.value();
+            }
+            auto f_convert_optional_packed_func =
+                [&args](int arg_idx) -> ffi::Optional<ffi::Function> {
+              if (auto opt_func = args[arg_idx].as<ffi::Function>()) {
+                return opt_func.value();
+              }
+              return std::nullopt;
+            };
+            f_transpose_append_mha = f_convert_optional_packed_func(13);
+            f_transpose_append_mla = f_convert_optional_packed_func(14);
+            TVM_FFI_ICHECK(!f_merge_inplace.empty()) << "Merge inplace function is not defined.";
 
-        std::vector<AttnKind> attn_kinds_vec;
-        attn_kinds_vec.reserve(attn_kinds.size());
-        for (int64_t attn_kind : attn_kinds) {
-          attn_kinds_vec.push_back(static_cast<AttnKind>(attn_kind));
-        }
+            std::vector<AttnKind> attn_kinds_vec;
+            attn_kinds_vec.reserve(attn_kinds.size());
+            for (int64_t attn_kind : attn_kinds) {
+              attn_kinds_vec.push_back(static_cast<AttnKind>(attn_kind));
+            }
 
-        TVM_FFI_ICHECK_EQ(cache_config.size(), 5);
-        int64_t reserved_num_seqs = cache_config[0];
-        int64_t total_token_capacity = cache_config[1];
-        int64_t prefill_chunk_size = cache_config[2];
-        int64_t page_size = cache_config[3];
-        bool support_sliding_window = cache_config[4];
-        int64_t num_total_pages = (total_token_capacity + page_size - 1) / page_size + 1;
-        if (support_sliding_window) {
-          // When sliding window is enabled, each sequence may use two more pages at most.
-          num_total_pages += reserved_num_seqs * 2;
-        }
-        // NOTE: We will remove this legacy construction after finishing the transition phase.
-        // Some `ffi::Function()` here are placeholders that will be filled.
-        ffi::ObjectPtr<PagedAttentionKVCacheObj> n = ffi::make_object<PagedAttentionKVCacheObj>(
-            page_size, num_layers, layer_id_begin_offset, layer_id_end_offset, num_qo_heads,
-            num_kv_heads, qk_head_dim, v_head_dim, attn_kinds_vec, reserved_num_seqs,
-            num_total_pages, prefill_chunk_size, support_sliding_window, RoPEMode(rope_mode),
-            rotary_scale, rotary_theta, std::move(rope_ext_factors), enable_kv_transfer,  //
-            init->dtype, init->device,                                                    //
-            std::move(f_transpose_append_mha), std::move(f_transpose_append_mla),
-            std::move(f_compact_copy), std::move(f_attention_prefill_ragged),
-            std::move(f_attention_prefill), std::move(f_attention_decode),
-            std::move(f_attention_prefill_sliding_window),
-            std::move(f_attention_decode_sliding_window),
-            std::move(f_attention_prefill_with_tree_mask_paged_kv),  //
-            std::move(f_attention_prefill_with_tree_mask),           //
-            std::move(f_mla_prefill), std::move(f_merge_inplace), std::move(f_split_rotary),
-            std::move(f_copy_single_page), std::move(f_debug_get_kv));
-        *rv = AttentionKVCache(std::move(n));
-      });
+            TVM_FFI_ICHECK_EQ(cache_config.size(), 6);
+            int64_t reserved_num_seqs = cache_config[0];
+            int64_t total_token_capacity = cache_config[1];
+            int64_t prefill_chunk_size = cache_config[2];
+            int64_t page_size = cache_config[3];
+            // NOTE: we use a hack here.
+            // cache_config[4] is meant for "support_sliding_window",
+            // but we use it for "may_use_megakernel" for now.
+            bool support_sliding_window = false;
+            int may_use_megakernel = cache_config[4];
+            int model_type = cache_config[5];
+            auto it = megakernel::kModelNames.find(model_type);
+            TVM_FFI_ICHECK(it != megakernel::kModelNames.end())
+                << "Model type " << model_type << " is not supported.";
+            std::string model_name = it->second;
+            int64_t num_total_pages = (total_token_capacity + page_size - 1) / page_size + 1;
+            if (support_sliding_window) {
+              // When sliding window is enabled, each sequence may use two more pages at most.
+              num_total_pages += reserved_num_seqs * 2;
+            }
+            // NOTE: We will remove this legacy construction after finishing the transition phase.
+            // Some `ffi::Function()` here are placeholders that will be filled.
+            ffi::ObjectPtr<PagedAttentionKVCacheObj> n = ffi::make_object<PagedAttentionKVCacheObj>(
+                page_size, num_layers, layer_id_begin_offset, layer_id_end_offset, num_qo_heads,
+                num_kv_heads, qk_head_dim, v_head_dim, attn_kinds_vec, reserved_num_seqs,
+                num_total_pages, prefill_chunk_size, support_sliding_window, RoPEMode(rope_mode),
+                rotary_scale, rotary_theta, std::move(rope_ext_factors), enable_kv_transfer,
+                may_use_megakernel, model_name, init->dtype, init->device,  //
+                std::move(f_transpose_append_mha), std::move(f_transpose_append_mla),
+                std::move(f_compact_copy), std::move(f_attention_prefill_ragged),
+                std::move(f_attention_prefill), std::move(f_attention_decode),
+                std::move(f_attention_prefill_sliding_window),
+                std::move(f_attention_decode_sliding_window),
+                std::move(f_attention_prefill_with_tree_mask_paged_kv),  //
+                std::move(f_attention_prefill_with_tree_mask),           //
+                std::move(f_mla_prefill), std::move(f_merge_inplace), std::move(f_split_rotary),
+                std::move(f_copy_single_page), std::move(f_debug_get_kv));
+            *rv = AttentionKVCache(std::move(n));
+          })
+      .def_method("vm.builtin.paged_attention_kv_cache_tensor_retrieve",
+                  &PagedAttentionKVCacheObj::RetrieveTensor)
+      .def_method("vm.builtin.paged_attention_kv_cache_get_exec_queue",
+                  &PagedAttentionKVCacheObj::GetExecQueue);
 }
 
 }  // namespace vm

@@ -79,6 +79,8 @@ if not _RUNTIME_ONLY:
 # raise proper error message when user run the package using
 # an older version of the python
 
+# tvm.tirx / tvm.megakernel
+from . import megakernel
 from .tirx.operator import tile_primitive_dispatch
 
 

@@ -1140,9 +1140,7 @@ class ExportedProgramImporter(BaseFXGraphImporter):
         target_w = size[3]
 
         # Relax affine_grid outputs [N, 2, H, W]
-        grid = self.block_builder.emit(
-            relax.op.image.affine_grid(theta, (target_h, target_w))
-        )
+        grid = self.block_builder.emit(relax.op.image.affine_grid(theta, (target_h, target_w)))
         # Permute to PyTorch convention [N, H, W, 2]
         return self.block_builder.emit(relax.op.permute_dims(grid, axes=[0, 2, 3, 1]))
 
@@ -1950,11 +1948,9 @@ class ExportedProgramImporter(BaseFXGraphImporter):
             custom_ops = set()
 
         # Create input variables.
-        (
-            parameter_buffer_constant_vars,
-            user_input_vars,
-            range_constraints,
-        ) = self.create_input_vars(exported_program)
+        (parameter_buffer_constant_vars, user_input_vars, range_constraints) = (
+            self.create_input_vars(exported_program)
+        )
         inputs_vars = user_input_vars.copy()
         inputs_vars.update(parameter_buffer_constant_vars)
 

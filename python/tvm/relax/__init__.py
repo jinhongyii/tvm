@@ -18,6 +18,10 @@
 # pylint: disable=invalid-name, wrong-import-position
 """The Relax IR namespace containing the IR, type, operator, builder, vm, etc."""
 
+import tvm.script
+
+tvm.script.register_dialect("relax", "tvm.relax.script")
+
 from tvm.runtime import vm
 from tvm.runtime.vm import VirtualMachine, VMInstrumentReturnKind
 
@@ -51,15 +55,7 @@ from .expr import (
 from .expr import const, extern, get_shape_of
 
 # Type
-from .ty import (
-    Type,
-    ObjectType,
-    ShapeType,
-    TensorType,
-    TupleType,
-    FuncType,
-    PackedFuncType,
-)
+from .ty import Type, ObjectType, ShapeType, TensorType, TupleType, FuncType, PackedFuncType
 
 # VM
 from .exec_builder import ExecBuilder
@@ -71,6 +67,7 @@ from .op.base import (
     call_pure_packed,
     call_dps_packed,
     call_tir_with_grad,
+    call_tir_device,
 )
 
 # BlockBuilder
@@ -122,5 +119,3 @@ from .vm_build import build, VMExecutable
 from .binding_rewrite import DataflowBlockRewrite
 
 import tvm.script
-
-tvm.script.register_dialect("relax", "tvm.relax.script")

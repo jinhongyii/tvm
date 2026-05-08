@@ -35,6 +35,7 @@
 #include <utility>
 #include <vector>
 
+#include "megakernel_utils.h"
 #if defined(OPENCL_ENABLE_HOST_PTR)
 #include "../opencl/opencl_common.h"
 #endif
@@ -538,6 +539,11 @@ class PagedKVCacheAuxDataManager {
   /*! \brief Commit all the compact KV auxiliary data copy operations since the last commit. */
   virtual void CommitCompactKVAuxDataCopy() = 0;
 
+  // megakernel inverse info for attn
+  virtual Tensor CopyInverseIndptrAsync(HostMemoryVector* data) = 0;
+
+  virtual Tensor CopyInverseIndicesAsync(HostMemoryVector* data) = 0;
+
  protected:
   /*! \brief The dtype of the auxiliary data. It is expected to be int32. */
   const DLDataType dtype_aux_;
@@ -736,6 +742,16 @@ class PlainPagedKVCacheAuxDataManager : public PagedKVCacheAuxDataManager {
   // The commit of the plain auxiliary data manager is no-op.
   void CommitCompactKVAuxDataCopy() final {}
 
+  Tensor CopyInverseIndptrAsync(HostMemoryVector* data) final {
+    LOG(FATAL) << "Megakernel is not supported for plain auxiliary data manager.";
+    throw;
+  }
+
+  Tensor CopyInverseIndicesAsync(HostMemoryVector* data) final {
+    LOG(FATAL) << "Megakernel is not supported for plain auxiliary data manager.";
+    throw;
+  }
+
  private:
   /*!
    * \brief Copy a vector of data to the input Tensor.
@@ -814,10 +830,27 @@ class CachedPagedKVCacheAuxDataManager : public PagedKVCacheAuxDataManager {
   explicit CachedPagedKVCacheAuxDataManager(int64_t reserved_num_seqs, int64_t num_total_pages,
                                             int64_t prefill_chunk_size, DLDataType dtype_aux,
                                             Device device, Device preferred_host_device,
-                                            TVMStreamHandle copy_stream)
+                                            TVMStreamHandle copy_stream, bool use_nvshmem)
       : PagedKVCacheAuxDataManager(dtype_aux, device, preferred_host_device, copy_stream),
         elem_byte_size_((dtype_aux.bits * dtype_aux.lanes + 7) / 8),
         offset_alignment_(cuda_byte_alignment_ / elem_byte_size_) {
+    std::function<Tensor(ffi::Shape)> f_aux_data_manager_nd_empty;
+    if (!use_nvshmem) {
+      f_aux_data_manager_nd_empty = [dtype_aux, device](ffi::Shape shape) {
+        return Tensor::Empty(shape, dtype_aux, device);
+      };
+    } else {
+      const std::optional<ffi::Function> f_nvshmem_init =
+          tvm::ffi::Function::GetGlobal("runtime.disco.nvshmem.init_nvshmem");
+      TVM_FFI_ICHECK(f_nvshmem_init.has_value())
+          << "NVSHMEM is not enabled. Please make sure NVSHMEM is enabled when compiling TVM.";
+      const ffi::Function f_nvshmem_empty =
+          tvm::ffi::Function::GetGlobalRequired("runtime.disco.nvshmem.empty");
+      f_aux_data_manager_nd_empty = [f_nvshmem_empty, dtype_aux, device](ffi::Shape shape) {
+        return f_nvshmem_empty(shape, dtype_aux, device).cast<Tensor>();
+      };
+    }
+
     // - Calculate cache size of all the attention auxiliary arrays in
     // local cache and the large on-device array.
     // int64_t attn_aux_data_cache_size =
@@ -827,7 +860,7 @@ class CachedPagedKVCacheAuxDataManager : public PagedKVCacheAuxDataManager {
     merged_attn_aux_data_host_ =
         HostMemoryVector(attn_aux_data_cache_size, dtype_aux, preferred_host_device);
     // - Initialize the device auxiliary data buffer.
-    merged_attn_aux_data_device_ = Tensor::Empty({attn_aux_data_cache_size}, dtype_aux, device);
+    merged_attn_aux_data_device_ = f_aux_data_manager_nd_empty({attn_aux_data_cache_size});
 
     // - Calculate cache size of all the compact KV auxiliary arrays in
     // local cache and the large on-device array.
@@ -837,7 +870,7 @@ class CachedPagedKVCacheAuxDataManager : public PagedKVCacheAuxDataManager {
     merged_compact_kv_aux_data_host_ =
         HostMemoryVector(compact_kv_aux_data_cache_size, dtype_aux, preferred_host_device);
     merged_compact_kv_aux_data_device_ =
-        Tensor::Empty({compact_kv_aux_data_cache_size}, dtype_aux, device);
+        f_aux_data_manager_nd_empty({compact_kv_aux_data_cache_size});
   }
 
   void ResetAttnAuxDataCopy() final { attn_aux_data_copy_offset_ = 0; }
@@ -955,6 +988,10 @@ class CachedPagedKVCacheAuxDataManager : public PagedKVCacheAuxDataManager {
     copy_src.device = Device{kDLCPU, 0};
     Tensor::CopyFromTo(&copy_src, &copy_dst, copy_stream_);
   }
+
+  Tensor CopyInverseIndptrAsync(HostMemoryVector* data) { return CopyAttnAuxVecToCache(data); }
+
+  Tensor CopyInverseIndicesAsync(HostMemoryVector* data) { return CopyAttnAuxVecToCache(data); }
 
  private:
   /*!

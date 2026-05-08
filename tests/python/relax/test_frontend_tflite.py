@@ -184,7 +184,7 @@ def test_cumsum():
         @tf.function(
             input_signature=[
                 tf.TensorSpec(shape=(3, 4), dtype=tf.float32),
-                tf.TensorSpec(shape=(5, 6), dtype=tf.int32)
+                tf.TensorSpec(shape=(5, 6), dtype=tf.int32),
             ]
         )
         def func(self, x, y):
@@ -567,7 +567,8 @@ def test_range_dynamic_scalar_inputs_not_supported():
 
     with pytest.raises(tvm.error.OpNotImplemented, match="dynamic scalar inputs"):
         verify(RangeDynamic)
-        
+
+
 def test_tile_ir():
     """TILE conversion with explicit Relax IR structural check."""
 
@@ -819,9 +820,7 @@ def test_random_standard_normal_dynamic_shape():
     class TfRandomStandardNormal(tf.Module):
         @tf.function(input_signature=[tf.TensorSpec(shape=(2,), dtype=tf.int32)])
         def func(self, shape):
-            return tf.raw_ops.RandomStandardNormal(
-                shape=shape, dtype=tf.float32, seed=3, seed2=5
-            )
+            return tf.raw_ops.RandomStandardNormal(shape=shape, dtype=tf.float32, seed=3, seed2=5)
 
     cf = TfRandomStandardNormal().func.get_concrete_function()
     mod = _get_mod_from_cfunc(cf)
@@ -959,9 +958,9 @@ def test_broadcast_args():
     @I.ir_module
     class Expected:
         @R.function
-        def main(
-            s0: R.Tensor((3,), dtype="int32"), s1: R.Tensor((3,), dtype="int32")
-        ) -> R.Tensor((3,), dtype="int32"):
+        def main(s0: R.Tensor((3,), dtype="int32"), s1: R.Tensor((3,), dtype="int32")) -> R.Tensor(
+            (3,), dtype="int32"
+        ):
             R.func_attr({"num_input": 2})
             with R.dataflow():
                 lv: R.Tensor((0,), dtype="int32") = R.full(
@@ -999,9 +998,9 @@ def test_broadcast_args_diff_length():
     @I.ir_module
     class Expected:
         @R.function
-        def main(
-            s0: R.Tensor((1,), dtype="int32"), s1: R.Tensor((3,), dtype="int32")
-        ) -> R.Tensor((3,), dtype="int32"):
+        def main(s0: R.Tensor((1,), dtype="int32"), s1: R.Tensor((3,), dtype="int32")) -> R.Tensor(
+            (3,), dtype="int32"
+        ):
             R.func_attr({"num_input": 2})
             with R.dataflow():
                 lv: R.Tensor((2,), dtype="int32") = R.full(
@@ -1451,6 +1450,7 @@ def test_reverse_v2():
 
     verify(ReverseV2, Expected)
 
+
 def _make_conv2d_module(data_shape, kernel_shape, data_format, strides, padding):
     class Conv2DModule(tf.Module):
         @tf.function(
@@ -1768,6 +1768,7 @@ def test_select_v2():
 
     verify(ModelBroadcasting)
 
+
 def test_scatter_nd():
     class Model(tf.Module):
         @tf.function(
@@ -1803,9 +1804,7 @@ def test_segment_sum():
                 lv1: R.Tensor((4, 1), dtype="int32") = R.expand_dims(
                     R.const([0, 0, 1, 2], "int32"), axis=[1]
                 )
-                gv: R.Tensor((3, 2), dtype="float32") = R.scatter_nd(
-                    lv, lv1, data, reduction="add"
-                )
+                gv: R.Tensor((3, 2), dtype="float32") = R.scatter_nd(lv, lv1, data, reduction="add")
                 R.output(gv)
             return gv
 
@@ -1836,9 +1835,7 @@ def test_unsorted_segment_min():
                 lv1: R.Tensor((4, 1), dtype="int32") = R.expand_dims(
                     R.const([2, 0, 2, 1], "int32"), axis=[1]
                 )
-                gv: R.Tensor((3, 2), dtype="float32") = R.scatter_nd(
-                    lv, lv1, data, reduction="min"
-                )
+                gv: R.Tensor((3, 2), dtype="float32") = R.scatter_nd(lv, lv1, data, reduction="min")
                 R.output(gv)
             return gv
 
@@ -1869,9 +1866,7 @@ def test_unsorted_segment_prod():
                 lv1: R.Tensor((4, 1), dtype="int32") = R.expand_dims(
                     R.const([1, 0, 1, 2], "int32"), axis=[1]
                 )
-                gv: R.Tensor((3, 2), dtype="float32") = R.scatter_nd(
-                    lv, lv1, data, reduction="mul"
-                )
+                gv: R.Tensor((3, 2), dtype="float32") = R.scatter_nd(lv, lv1, data, reduction="mul")
                 R.output(gv)
             return gv
 
@@ -2179,8 +2174,8 @@ def _convert_detection_postprocess_with_options(
     converter.exp_tab = tflite_frontend.ExprTable()
     converter.get_input_tensors = lambda op: inputs
     converter.get_expr = lambda tensor_idx: {0: loc, 1: cls}[tensor_idx]
-    converter.get_tensor_value = (
-        lambda tensor: _DETECTION_POSTPROCESS_ANCHORS if tensor.tensor_idx == 2 else None
+    converter.get_tensor_value = lambda tensor: (
+        _DETECTION_POSTPROCESS_ANCHORS if tensor.tensor_idx == 2 else None
     )
     converter.get_tensor_type_str = lambda tensor_type: "float32"
     op = _StubDetectionPostprocessOp(custom_options)
@@ -3241,7 +3236,7 @@ def test_relu_n1_to_1():
         pytest.param(None, id="elementwise_no_shared_axes"),
     ],
 )
-def test_prelu(shared_axes):
+def test_prelu_shared_axes(shared_axes):
     inputs = tf.keras.Input(shape=(4, 4, 3), batch_size=1, dtype=tf.float32)
     prelu_kwargs = {
         "alpha_initializer": tf.initializers.constant(0.25),
@@ -3408,6 +3403,7 @@ def test_sparse_to_dense():
 # Since TensorFlow does not provide an API to create sparse TFLite models,
 # we manually build them using the flatbuffers API.
 
+
 # Import schema helpers explicitly. CI's generated tflite package does not
 # reliably re-export these builder helpers and enums at the package top-level.
 def _get_tflite_schema_module(module_name):
@@ -3529,9 +3525,7 @@ def _build_operator(
     builtin_options2=None,
 ):
     inputs_vec = _tflite_int32_vector(builder, _tfl_operator.OperatorStartInputsVector, inputs)
-    outputs_vec = _tflite_int32_vector(
-        builder, _tfl_operator.OperatorStartOutputsVector, outputs
-    )
+    outputs_vec = _tflite_int32_vector(builder, _tfl_operator.OperatorStartOutputsVector, outputs)
     _tfl_operator.OperatorStart(builder)
     _tfl_operator.OperatorAddOpcodeIndex(builder, opcode_index)
     _tfl_operator.OperatorAddInputs(builder, inputs_vec)
@@ -3564,9 +3558,7 @@ def _build_subgraph(builder, *, tensors, operators, inputs, outputs):
         builder, _tfl_subgraph.SubGraphStartOperatorsVector, operators
     )
     inputs_vec = _tflite_int32_vector(builder, _tfl_subgraph.SubGraphStartInputsVector, inputs)
-    outputs_vec = _tflite_int32_vector(
-        builder, _tfl_subgraph.SubGraphStartOutputsVector, outputs
-    )
+    outputs_vec = _tflite_int32_vector(builder, _tfl_subgraph.SubGraphStartOutputsVector, outputs)
 
     _tfl_subgraph.SubGraphStart(builder)
     _tfl_subgraph.SubGraphAddTensors(builder, tensors_vec)
@@ -3905,6 +3897,7 @@ def test_densify_with_add():
 
     tvm.ir.assert_structural_equal(mod, Expected)
 
+
 def test_densify_with_conv2d():
     """Test DENSIFY followed by CONV2D - a real-world scenario.
 
@@ -3937,6 +3930,7 @@ def test_densify_with_conv2d():
             return gv
 
     tvm.ir.assert_structural_equal(mod, Expected)
+
 
 def test_densify_with_fully_connected():
     """Test DENSIFY followed by FULLY_CONNECTED - a real-world scenario.
@@ -4022,9 +4016,7 @@ def test_dilate():
         _build_buffer(builder),
         _build_buffer(builder),
         _build_buffer(builder, np.asarray(dilations, dtype=np.int32).tobytes()),
-        _build_buffer(
-            builder, np.asarray([dilation_value], dtype=np.float32).tobytes()
-        ),
+        _build_buffer(builder, np.asarray([dilation_value], dtype=np.float32).tobytes()),
         _build_buffer(builder),
     ]
 
@@ -4057,9 +4049,7 @@ def test_dilate():
                 lv4: R.Tensor((5, 4), dtype="float32") = R.strided_slice(
                     lv3, [0, 1], [0, 0], [5, 4], [1, 1], assume_inbound=False
                 )
-                lv5: R.Tensor((5, 4, 1), dtype="float32") = R.reshape(
-                    lv4, R.shape([5, 4, 1])
-                )
+                lv5: R.Tensor((5, 4, 1), dtype="float32") = R.reshape(lv4, R.shape([5, 4, 1]))
                 lv6: R.Tensor((5, 4, 1), dtype="float32") = R.full(
                     R.shape([5, 4, 1]), R.const(0.5, "float32"), dtype="float32"
                 )
@@ -4093,9 +4083,7 @@ def test_dilate_dynamic_dilations():
         _build_buffer(builder),
         _build_buffer(builder),
         _build_buffer(builder),  # dilations is a runtime input so empty buffer
-        _build_buffer(
-            builder, np.asarray([dilation_value], dtype=np.float32).tobytes()
-        ),
+        _build_buffer(builder, np.asarray([dilation_value], dtype=np.float32).tobytes()),
         _build_buffer(builder),
     ]
 
@@ -4136,9 +4124,9 @@ def test_dilate_dynamic_dilations():
                     R.const(0.5, "float32"),
                     dtype="float32",
                 )
-                lv6: R.Tensor(
-                    (3, 1 + (dilate_stride_0 - 1), 4), dtype="float32"
-                ) = R.concat((lv4, lv5), axis=1)
+                lv6: R.Tensor((3, 1 + (dilate_stride_0 - 1), 4), dtype="float32") = R.concat(
+                    (lv4, lv5), axis=1
+                )
                 lv7: R.Tensor((3 * dilate_stride_0, 4), dtype="float32") = R.reshape(
                     lv6, R.shape([3 * dilate_stride_0, 4])
                 )
@@ -4153,9 +4141,9 @@ def test_dilate_dynamic_dilations():
                     [1, 1],
                     assume_inbound=False,
                 )
-                lv9: R.Tensor(
-                    (2 * dilate_stride_0 + 1, 4, 1), dtype="float32"
-                ) = R.reshape(lv8, R.shape([2 * dilate_stride_0 + 1, 4, 1]))
+                lv9: R.Tensor((2 * dilate_stride_0 + 1, 4, 1), dtype="float32") = R.reshape(
+                    lv8, R.shape([2 * dilate_stride_0 + 1, 4, 1])
+                )
                 lv10: R.Tensor(
                     (2 * dilate_stride_0 + 1, 4, dilate_stride_1 - 1), dtype="float32"
                 ) = R.full(
@@ -4167,10 +4155,8 @@ def test_dilate_dynamic_dilations():
                     (2 * dilate_stride_0 + 1, 4, 1 + (dilate_stride_1 - 1)),
                     dtype="float32",
                 ) = R.concat((lv9, lv10), axis=2)
-                lv12: R.Tensor(
-                    (2 * dilate_stride_0 + 1, 4 * dilate_stride_1), dtype="float32"
-                ) = R.reshape(
-                    lv11, R.shape([2 * dilate_stride_0 + 1, 4 * dilate_stride_1])
+                lv12: R.Tensor((2 * dilate_stride_0 + 1, 4 * dilate_stride_1), dtype="float32") = (
+                    R.reshape(lv11, R.shape([2 * dilate_stride_0 + 1, 4 * dilate_stride_1]))
                 )
                 gv: R.Tensor(
                     (

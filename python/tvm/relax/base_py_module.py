@@ -37,10 +37,14 @@ except ImportError:
 
 try:
     from tvm_ffi._optional_torch_c_dlpack import load_torch_c_dlpack_extension
-
-    _FASTER_DLPACK_EXTENSION = load_torch_c_dlpack_extension()
 except ImportError:
     _FASTER_DLPACK_EXTENSION = None
+else:
+    # Keep import behavior aligned with tvm_ffi's optional addon switch.
+    if os.environ.get("TVM_FFI_DISABLE_TORCH_C_DLPACK", "0") == "1":
+        _FASTER_DLPACK_EXTENSION = None
+    else:
+        _FASTER_DLPACK_EXTENSION = load_torch_c_dlpack_extension()
 
 
 class BasePyModule:

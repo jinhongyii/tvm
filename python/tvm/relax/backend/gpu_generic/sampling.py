@@ -97,13 +97,8 @@ def gpu_multinomial_from_uniform(
             f"but got {tx_len}, {ty_len}, {thread_elem}"
         )
 
-    @T.macro
-    def block_cumsum(
-        ty: T.int64,
-        tx: T.int64,
-        source_local: T.Buffer,
-        output_shared: T.Buffer,
-    ):
+    @T.inline
+    def block_cumsum(ty: T.int64, tx: T.int64, source_local: T.Buffer, output_shared: T.Buffer):
         """cumsum inside block (SM)"""
         # Inclusive scan inside thread
         for i in T.unroll(1, thread_elem):
@@ -131,7 +126,7 @@ def gpu_multinomial_from_uniform(
         # return a != b
         return T.Cast("int8", a) != T.Cast("int8", b)
 
-    @T.macro
+    @T.inline
     def block_adjacent_difference_left(
         ty: T.int64,
         tx: T.int64,
@@ -156,7 +151,7 @@ def gpu_multinomial_from_uniform(
     def op_reduce_sum(a, b):
         return a + b
 
-    @T.macro
+    @T.inline
     def block_reduce_with_mask(
         ty: T.int64,
         tx: T.int64,
@@ -186,7 +181,7 @@ def gpu_multinomial_from_uniform(
                     shared_buf[idx] = reduce_op(shared_buf[idx], shared_buf[idx + (1 << i)])
             output_local[()] = shared_buf[0]
 
-    @T.macro
+    @T.inline
     def single_batch_sampling(
         prob,
         row_idx,

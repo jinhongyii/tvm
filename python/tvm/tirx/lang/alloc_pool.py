@@ -406,8 +406,8 @@ class SMEMPool:
         If omitted, an ``alloc_buffer([0], "uint8", scope="shared.dyn")`` is
         created automatically and ``commit()`` must be called after all
         allocations to emit the size annotation.
-        If a ``Var`` is provided, the caller manages the backing buffer and
-        ``commit()`` is a no-op.
+        If a ``Var`` (or ``None`` for megakernel fusion mode) is provided,
+        the caller manages the backing buffer and ``commit()`` is a no-op.
     """
 
     def __init__(self, ptr=_POOL_UNSET):

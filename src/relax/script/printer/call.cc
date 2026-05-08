@@ -76,12 +76,17 @@ ffi::Optional<ExprDoc> PrintCallTIRDPSPacked(const relax::Call& n, const AccessP
   static const Op& call_dps_packed_op = Op::Get("relax.call_dps_packed");
   static const Op& call_tir_with_grad_op = Op::Get("relax.call_tir_with_grad");
   static const Op& call_tir_local_view = Op::Get("relax.dist.call_tir_local_view");
+  static const Op& call_tir_device_op = Op::Get("relax.call_tir_device");
   if (!n->op.same_as(call_tir_op) && !n->op.same_as(call_dps_packed_op) &&
       !n->op.same_as(call_tir_with_grad_op) && !n->op.same_as(call_tir_local_view) &&
-      !n->op.same_as(call_tir_inplace_op)) {
+      !n->op.same_as(call_tir_inplace_op) && !n->op.same_as(call_tir_device_op)) {
     return std::nullopt;
   }
-  TVM_FFI_ICHECK(n->args.size() == 2 || n->args.size() == 3);
+  if (n->op.same_as(call_tir_device_op)) {
+    TVM_FFI_ICHECK(n->args.size() == 6 || n->args.size() == 7);
+  } else {
+    TVM_FFI_ICHECK(n->args.size() == 2 || n->args.size() == 3);
+  }
   TVM_FFI_ICHECK(n->sinfo_args.size() == 1);
   ffi::Array<ExprDoc> args;
   ffi::Array<ffi::String> kwargs_keys;
@@ -140,6 +145,59 @@ ffi::Optional<ExprDoc> PrintCallTIRDPSPacked(const relax::Call& n, const AccessP
     return Relax(d, "call_tir_with_grad")->Call(args, kwargs_keys, kwargs_values);
   }
   // end of specially handling call_tir_with_grad
+
+  // start of specially handling call_tir_device
+  if (n->op.same_as(call_tir_device_op)) {
+    kwargs_keys.push_back("tile_num");
+    kwargs_values.push_back(d->AsDoc<ExprDoc>(n->args[2], n_p->Attr("args")->ArrayItem(2)));
+    kwargs_keys.push_back("in_dep");
+    kwargs_values.push_back(d->AsDoc<ExprDoc>(n->args[3], n_p->Attr("args")->ArrayItem(3)));
+    kwargs_keys.push_back("out_dep");
+    kwargs_values.push_back(d->AsDoc<ExprDoc>(n->args[4], n_p->Attr("args")->ArrayItem(4)));
+    kwargs_keys.push_back("inv_in_dep");
+    kwargs_values.push_back(d->AsDoc<ExprDoc>(n->args[5], n_p->Attr("args")->ArrayItem(5)));
+    if (const auto* call_tir_device_attrs = n->attrs.as<relax::CallTIRDeviceAttrs>()) {
+      kwargs_keys.push_back("job_id");
+      kwargs_values.push_back(
+          LiteralDoc::Int(call_tir_device_attrs->job_id, n_p->Attr("attrs")->Attr("job_id")));
+      kwargs_keys.push_back("in_events");
+      kwargs_values.push_back(d->AsDoc<ExprDoc>(call_tir_device_attrs->in_events,
+                                                n_p->Attr("attrs")->Attr("in_events")));
+      kwargs_keys.push_back("out_events");
+      kwargs_values.push_back(d->AsDoc<ExprDoc>(call_tir_device_attrs->out_events,
+                                                n_p->Attr("attrs")->Attr("out_events")));
+      kwargs_keys.push_back("inv_in_events");
+      kwargs_values.push_back(d->AsDoc<ExprDoc>(call_tir_device_attrs->inv_in_events,
+                                                n_p->Attr("attrs")->Attr("inv_in_events")));
+      kwargs_keys.push_back("in_extra_args");
+      kwargs_values.push_back(d->AsDoc<ExprDoc>(call_tir_device_attrs->in_extra_args,
+                                                n_p->Attr("attrs")->Attr("in_extra_args")));
+      kwargs_keys.push_back("out_extra_args");
+      kwargs_values.push_back(d->AsDoc<ExprDoc>(call_tir_device_attrs->out_extra_args,
+                                                n_p->Attr("attrs")->Attr("out_extra_args")));
+      kwargs_keys.push_back("inv_in_extra_args");
+      kwargs_values.push_back(d->AsDoc<ExprDoc>(call_tir_device_attrs->inv_in_extra_args,
+                                                n_p->Attr("attrs")->Attr("inv_in_extra_args")));
+      kwargs_keys.push_back("handle_config");
+      kwargs_values.push_back(d->AsDoc<ExprDoc>(call_tir_device_attrs->handle_config,
+                                                n_p->Attr("attrs")->Attr("handle_config")));
+    }
+    kwargs_keys.push_back("inplace_indices");
+    ffi::Array<ExprDoc> index_fields;
+    if (auto* call_tir_inplace_attrs = n->attrs.as<relax::CallTIRDeviceAttrs>()) {
+      for (auto inplace_index : call_tir_inplace_attrs->inplace_indices) {
+        index_fields.push_back(
+            LiteralDoc::Int(inplace_index.IntValue(), n_p->Attr("attrs")->Attr("inplace_indices")));
+      }
+    }
+    kwargs_values.push_back(ListDoc(index_fields));
+    if (n->args.size() == 4) {
+      kwargs_keys.push_back("tir_vars");
+      kwargs_values.push_back(d->AsDoc<ExprDoc>(n->args[5], n_p->Attr("args")->ArrayItem(3)));
+    }
+    return Relax(d, "call_tir_device")->Call(args, kwargs_keys, kwargs_values);
+  }
+  // end of specially handling call_tir_device
 
   if (n->op.same_as(call_dps_packed_op)) {
     return Relax(d, "call_dps_packed")->Call(args, kwargs_keys, kwargs_values);
@@ -233,17 +291,27 @@ ffi::Optional<ExprDoc> PrintRelaxPrint(const relax::Call& n, const AccessPath& n
   if (!n->op.same_as(print_op)) {
     return std::nullopt;
   }
-  TVM_FFI_ICHECK(n->args.size() >= 1);
-  // special handling: it is important to indicate that the format string (first argument)
-  // is the _format_ string, or else roundtripping will fail
-  // (the format string will be interpreted as an argument and there will be a new default format
-  // string given)
-  ExprDoc first_arg = d->AsDoc<ExprDoc>(n->args[0], n_p->Attr("args")->ArrayItem(0));
-  ffi::Array<ExprDoc> args;
-  for (size_t i = 1; i < n->args.size(); i++) {
-    args.push_back(d->AsDoc<ExprDoc>(n->args[i], n_p->Attr("args")->ArrayItem(i)));
+}
+
+ffi::Optional<ExprDoc> PrintAllocEventTensor(const relax::Call& n, const AccessPath& n_p,
+                                             const IRDocsifier& d) {
+  static const Op& alloc_event_tensor_op = Op::Get("relax.alloc_event_tensor");
+  if (!n->op.same_as(alloc_event_tensor_op)) {
+    return std::nullopt;
   }
-  return Relax(d, "print")->Call(args, {"format"}, {first_arg});
+  ffi::Array<ffi::String> kwargs_keys;
+  ffi::Array<ExprDoc> kwargs_values;
+  kwargs_keys.push_back("workspace");
+  kwargs_values.push_back(d->AsDoc<ExprDoc>(n->args[0], n_p->Attr("args")->ArrayItem(0)));
+  kwargs_keys.push_back("shape");
+  kwargs_values.push_back(d->AsDoc<ExprDoc>(n->args[1], n_p->Attr("args")->ArrayItem(1)));
+  kwargs_keys.push_back("f_init");
+  kwargs_values.push_back(d->AsDoc<ExprDoc>(n->args[2], n_p->Attr("args")->ArrayItem(2)));
+  auto* attrs = n->attrs.as<relax::AllocEventTensorAttrs>();
+  kwargs_keys.push_back("extra_args");
+  kwargs_values.push_back(
+      d->AsDoc<ExprDoc>(attrs->extra_args, n_p->Attr("attrs")->Attr("extra_args")));
+  return Relax(d, "alloc_event_tensor")->Call({}, kwargs_keys, kwargs_values);
 }
 
 TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
@@ -269,6 +337,10 @@ TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
           if (ffi::Optional<ExprDoc> doc = PrintRelaxPrint(n, n_p, d)) {
             return doc.value();
           }
+          // Special case: alloc_event_tensor
+          if (ffi::Optional<ExprDoc> doc = PrintAllocEventTensor(n, n_p, d)) {
+            return doc.value();
+          }
           ExprDoc prefix{ffi::UnsafeInit()};
           ffi::Array<ExprDoc> args;
           ffi::Array<ffi::String> kwargs_keys;
@@ -289,7 +361,7 @@ TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
                      n->op->IsInstance<tvm::GlobalVarNode>()) {
             prefix = d->AsDoc<ExprDoc>(n->op, n_p->Attr("op"));
           } else {
-            TVM_FFI_THROW(TypeError) << "Unsupported op: " << n->op->GetTypeKey();
+            TVM_FFI_THROW(InternalError) << "TypeError: Unsupported op: " << n->op->GetTypeKey();
           }
           // Step 2. Print args
           if (!n->args.empty()) {

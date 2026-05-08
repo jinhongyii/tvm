@@ -6699,9 +6699,7 @@ def test_custom_op():
                 R.output(gv)
             return gv
 
-    from tvm.relax.frontend.torch.exported_program_translator import (
-        ExportedProgramImporter,
-    )
+    from tvm.relax.frontend.torch.exported_program_translator import ExportedProgramImporter
 
     def custom_add_converter(node: torch.fx.Node, self: ExportedProgramImporter) -> relax.Var:
         x = self.env[node.args[0]]
@@ -8283,11 +8281,9 @@ def test_gru():
         pytorch_output3 = model3(x3)
 
     # Verify output shape is correct (hidden_size * 2 due to bidirectional)
-    assert pytorch_output3.shape == (
-        2,
-        3,
-        10,
-    ), f"Expected shape (2, 3, 10), got {pytorch_output3.shape}"
+    assert pytorch_output3.shape == (2, 3, 10), (
+        f"Expected shape (2, 3, 10), got {pytorch_output3.shape}"
+    )
 
     exported_program3 = export(model3, args=(x3,))
     mod3 = from_exported_program(exported_program3)
@@ -8327,11 +8323,9 @@ def test_gru():
         pytorch_output4 = model4(x4)
 
     # Verify output shape (seq_len, batch, hidden_size * 2)
-    assert pytorch_output4.shape == (
-        4,
-        2,
-        8,
-    ), f"Expected shape (4, 2, 8), got {pytorch_output4.shape}"
+    assert pytorch_output4.shape == (4, 2, 8), (
+        f"Expected shape (4, 2, 8), got {pytorch_output4.shape}"
+    )
 
     exported_program4 = export(model4, args=(x4,))
     mod4 = from_exported_program(exported_program4)
@@ -9098,9 +9092,7 @@ def test_cond_nested():
 def test_affine_grid():
     class AffineGrid(Module):
         def forward(self, theta):
-            return torch.nn.functional.affine_grid(
-                theta, [1, 3, 16, 16], align_corners=True
-            )
+            return torch.nn.functional.affine_grid(theta, [1, 3, 16, 16], align_corners=True)
 
     @tvm.script.ir_module
     class expected:
@@ -9129,9 +9121,7 @@ def test_affine_grid_numerically():
 
     class AffineGrid(Module):
         def forward(self, theta):
-            return torch.nn.functional.affine_grid(
-                theta, [2, 3, 8, 12], align_corners=True
-            )
+            return torch.nn.functional.affine_grid(theta, [2, 3, 8, 12], align_corners=True)
 
     model = AffineGrid()
     example_args = (torch.randn(2, 2, 3, dtype=torch.float32),)

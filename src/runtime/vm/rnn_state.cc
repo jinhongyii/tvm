@@ -208,7 +208,9 @@ class RNNStateImpObj : public RNNStateObj {
   /************** Interaction **************/
 
   void BeginForward(const ffi::Shape& seq_ids, const ffi::Shape& append_lengths,
-                    const ffi::Optional<ffi::Shape>& opt_token_tree_parent_ptr) final {
+                    const ffi::Optional<ffi::Shape>& opt_token_tree_parent_ptr,
+                    bool use_megakernel) final {
+    TVM_FFI_ICHECK(!use_megakernel) << "RNN state does not support megakernel.";
     TVM_FFI_ICHECK_EQ(seq_ids.size(), append_lengths.size())
         << "The seq_ids size (" << seq_ids.size() << ") and append_lengths size ("
         << append_lengths.size() << ") mismatch.";

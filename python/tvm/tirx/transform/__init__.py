@@ -22,5 +22,6 @@ from .function_pass import prim_func_pass, PrimFuncPass
 from .transform import *
 
 # TIRX-specific transforms
+from .legalize_event_tensor import EventTensorLegalizer
 from .naive_allocator import NaiveAllocator
 from .private_buffer_alloc import PrivateBufferAlloc

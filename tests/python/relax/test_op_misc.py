@@ -21,7 +21,8 @@ import tvm
 import tvm.testing
 from tvm import relax as rx
 from tvm.script import relax as R
-from tvm.script import tirx as T
+from tvm.script import tir as T
+from tvm.tir import IndexMap
 
 
 @tvm.register_global_func("test.op.identity", override=True)
@@ -160,5 +161,26 @@ def test_builtin_stop_lift_params():
     tvm.ir.assert_structural_equal(x1.struct_info, R.Tensor([4, 5], "float32"))
 
 
+def test_call_tir_device():
+    bb = rx.BlockBuilder()
+    e0 = rx.Var("e0", R.Tensor([54, 96], "int64"))
+    e1 = rx.Var("e1", R.Tensor([54], "int64"))
+    v0 = rx.Var("v0", R.Tensor([54, 96], "float32"))
+    x1 = rx.op.call_tir_device(
+        identity_tir,
+        [v0],
+        R.Tensor((54, 96), "float32"),
+        (54, 96),
+        [e0],
+        [e1],
+        in_deps=[lambda i, j: (i, j)],
+        out_deps=[lambda i, j: i],
+    )
+    assert x1.attrs.in_deps[0].is_equivalent_to(IndexMap.from_func(lambda i, j: (i, j)))
+    assert x1.attrs.out_deps[0].is_equivalent_to(IndexMap.from_func(lambda i, j: i))
+    assert x1.attrs.inplace_indices[0] == -1
+
+
 if __name__ == "__main__":
-    tvm.testing.main()
+    # tvm.testing.main()
+    test_call_tir_device()

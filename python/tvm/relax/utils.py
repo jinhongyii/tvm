@@ -14,7 +14,6 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# ruff: noqa: F401, RUF005
 
 # pylint: disable=invalid-name,too-many-locals
 
@@ -23,7 +22,7 @@
 import itertools
 import string
 from collections.abc import Callable
-from typing import Any, Optional
+from typing import Any
 
 import tvm_ffi
 from tvm_ffi import Array, Map
@@ -32,6 +31,7 @@ import tvm
 
 from .. import tirx
 from ..ir import Attrs, Type, VDevice
+from ..ir.expr import GlobalVar
 from ..te import Tensor as te_Tensor
 from ..te import create_prim_func
 from ..tirx import PrimExpr
@@ -192,7 +192,7 @@ def gen_call_tir_inputs(
 
         In the common case, the type of te_args is a Relax expression and is converted
         into a TE tensor.
-        If te_args is a nested or recursive datatype (i.e list, dict, tvm_ffi.Map, tvm_ffi.Array),
+        If te_args is a nested or recursive datatype (i.e list, dict, tvm.ir.Map, tvm.ir.Array),
         we recursive and convert any value of type Relax expression into a TE tensor.
         Common values of type int, float, and str are preserved.
 
@@ -361,7 +361,7 @@ def gen_call_tir_inputs(
     outs = [te_out] if isinstance(te_out, te_Tensor) else list(te_out)
     unbound_tir_vars = _get_unbound_tir_vars([*create_primfunc_args, *outs], extra_tir_args_list)
 
-    inputs = [*create_primfunc_args] + outs + unbound_tir_vars
+    inputs = [*create_primfunc_args, *outs, *unbound_tir_vars]
     tir_func = create_prim_func(inputs, "int64")
 
     if primfunc_attrs:
@@ -390,3 +390,222 @@ def gen_call_tir_inputs(
         tir_vars = _shape_with_old_tir_var(unbound_tir_vars, tir_var_inverse_map)
 
     return (tir_func, call_tir_args, output_sinfo, tir_vars)
+
+
+import inspect  # noqa: E402
+import types  # noqa: E402
+
+from tvm.script import tirx as T  # noqa: E402
+from tvm.tirx.function import PrimFunc  # noqa: E402
+
+PrimExprLike = int | PrimExpr
+
+
+def add_func_to_ir_module(func: PrimFunc) -> GlobalVar:
+    if hasattr(add_func_to_ir_module, "cnt"):
+        add_func_to_ir_module.cnt += 1
+    else:
+        add_func_to_ir_module.cnt = 0
+    from tvm.script.ir_builder.ir import decl_function, lookup_name
+
+    from .block_builder import BlockBuilder
+
+    bb = BlockBuilder.current()
+    if bb is None:
+        # in script context
+        while lookup_name(f"f_{add_func_to_ir_module.cnt}"):
+            add_func_to_ir_module.cnt += 1
+        gvar = decl_function(f"f_{add_func_to_ir_module.cnt}", func)
+    else:
+        # in block builder context
+        gvar = bb.add_func(func, f"f_{add_func_to_ir_module.cnt}")
+    return gvar
+
+
+def extract_extra_args(func: Callable) -> tuple[Callable, list[Expr | PrimExprLike]]:
+    # TODO: Now only directly extracting Expr and PrimExprLike from globals and closure
+    #       Need to support extracting Expr and PrimExprLike from List/Dict/Object
+
+    def make_cell(value):
+        return (lambda: value).__closure__[0]
+
+    # copy __globals__ and __closure__ to avoid side effect
+    func = types.FunctionType(
+        func.__code__,
+        func.__globals__.copy(),
+        func.__name__,
+        argdefs=func.__defaults__,
+        closure=tuple(make_cell(c.cell_contents) for c in func.__closure__)
+        if func.__closure__
+        else None,
+    )
+    code = func.__code__
+    cnt = 0
+    new_arg_names = []
+    cell_index_map = {}
+    extra_args = []
+    for i in range(len(code.co_freevars)):
+        if isinstance(func.__closure__[i].cell_contents, Expr | PrimExprLike):
+            new_arg_name = f"extra_arg_{cnt}"
+            new_arg_names.append(new_arg_name)
+            cell_index_map[new_arg_name] = ("closure", i)
+            extra_args.append(func.__closure__[i].cell_contents)
+            cnt += 1
+    for name, value in func.__globals__.items():
+        if name in code.co_names and isinstance(value, Expr | PrimExprLike):
+            new_arg_name = f"extra_arg_{cnt}"
+            new_arg_names.append(new_arg_name)
+            cell_index_map[new_arg_name] = ("global", name)
+            extra_args.append(value)
+            cnt += 1
+    if len(new_arg_names) == 0:
+        return func, extra_args
+    original_param_names = list(inspect.signature(func).parameters.keys())
+    new_signature_args = original_param_names + new_arg_names
+
+    def wrapper(*args, **kwargs):
+        arg_values = dict(zip(new_signature_args, args))
+        arg_values.update(kwargs)
+        # replace the content of cell corresponding extra args
+        for new_name, value in arg_values.items():
+            if new_name in cell_index_map:
+                var_scope, idx = cell_index_map[new_name]
+                if var_scope == "global":
+                    func.__globals__[idx] = value
+                else:  # closure
+                    func.__closure__[idx].cell_contents = value
+        original_args = args[: len(original_param_names)]
+        original_kwargs = {k: v for k, v in kwargs.items() if k in original_param_names}
+        result = func(*original_args, **original_kwargs)
+        return result
+
+    # modify the signature of wrapper function
+    new_params = [
+        inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        for name in new_signature_args
+    ]
+    wrapper.__signature__ = inspect.Signature(new_params)
+    return wrapper, extra_args
+
+
+def trans_callable_to_primfunc(
+    func: Callable | PrimExprLike, input_dim: int, output_dim: int, dtype: str
+) -> tuple[GlobalVar, list[Expr | PrimExpr]]:
+    if isinstance(func, PrimExprLike):
+        assert output_dim == 1, "The output_dim must be 1 when func is PrimExprLike."
+
+        def new_func(*args):
+            return func
+    else:
+        new_func = func
+    new_func, extra_args = extract_extra_args(new_func)
+
+    def _convert_arg(para: tirx.Var | tirx.Buffer) -> T.Var:
+        if isinstance(para, tirx.Var) or isinstance(para, tirx.Buffer):
+            ret = T.arg("var", para)
+        else:
+            f_imme_create = {"int32": T.int32, "int64": T.int64}[dtype]
+            ret = T.arg("var", f_imme_create())
+        if isinstance(ret, tirx.Var) and ret.dtype != dtype:
+            ret = T.cast(ret, dtype)
+        return ret
+
+    def _unpack_and_assign(value_list: list[T.Var], buf_list: list[T.Buffer], length):
+        if length == 1:
+            T.buffer_store(buf_list[0], value_list, [0])
+        else:
+            for i in range(length):
+                T.buffer_store(buf_list[i], value_list[i], [0])
+
+    # prepare the tir input and output
+    tir_input = [tirx.Var("", dtype) for _ in range(input_dim)]
+    for arg in extra_args:
+        if isinstance(arg, Expr):
+            tir_input.append(
+                T.Buffer(
+                    shape=[v for v in arg.struct_info.shape],
+                    dtype=arg.struct_info.dtype,
+                    scope="global",
+                )
+            )
+        elif isinstance(arg, PrimExpr):
+            tir_input.append(tirx.Var("", arg.dtype))
+        else:  # int
+            tir_input.append(arg)
+    tir_output = [T.Buffer(shape=[1], dtype=dtype, scope="local") for _ in range(output_dim)]
+
+    @T.prim_func(check_well_formed=False, private=True)
+    def f():
+        in_args = T.meta_var([_convert_arg(spec) for spec in tir_input])
+        out_arg = T.meta_var([_convert_arg(spec) for spec in tir_output])
+        _unpack_and_assign(new_func(*in_args), out_arg, output_dim)
+
+    gvar = add_func_to_ir_module(f)
+    return gvar, [
+        (
+            var
+            if isinstance(var, Expr | PrimExpr)
+            else {"int32": T.int32, "int64": T.int64}[dtype](var)
+        )
+        for var in extra_args
+    ]
+
+
+class Dependency:
+    def __init__(self, event: Expr, dep: Callable | PrimExprLike, tile_idx_dtype: str = "int32"):
+        """
+        Parameters
+        ----------
+        event : Expr
+            The variable of event tensor.
+        dep : Union[Callable, PrimExprLike]
+            The dependency function.
+            It takes the (tile index/event coordinate), and the index of the (event coordinate/tile index) to be calculated.
+            It returns the number of depended (event coordinates/tile indices),
+            and the indices of the depended (event coordinate/tile index).
+        tile_idx_dtype : str, optional
+            The data type of the tile index. Defaults to "int32".
+
+        Notes
+        -----
+        The order of parameters for both callable functions is critical and strictly defined.
+        1. The dependency function (`dep`) must accept parameters in the following order:
+           The (tile index/event coordinate),
+           The index of the (event coordinate/tile index) to be calculated.
+        2. The dependency function (`dep`) must return the number of depended (event coordinates/tile indices),
+           and the indices of the depended (event coordinate/tile index).
+        3. The event coordinate in defined as (rank, *evt_tensor_indices). 'rank=-1' represents the local rank.
+
+        Examples
+        --------
+        Task (i, j, k) depends on events E at coordinates (rank=-1, X[i], j, 0), (rank=-1, X[i], j, 1), ..., (rank=-1, X[i], j, Y[k]),
+        where X, Y are the tensors.
+        Then the Dependency object can be created as follows:
+        >>> dependency = Dependency(
+        ...     event=E,
+        ...     dep=lambda i, j, k, idx: (Y[k] + 1, -1, X[i], j, idx),
+        ... )
+        Then the dependency can be handled by:
+        >>> handled_info = dependency.handle_dep(input_dim=4, output_dim=4)
+        """  # noqa: E501
+        self.event = event
+        if (
+            not isinstance(event, Expr)
+            or isinstance(event, list)
+            or isinstance(event, tuple)
+            or isinstance(event, tvm.relax.Tuple)
+        ):
+            raise ValueError("One Dependency obj should handle a single event.")
+        self.dep = dep
+        self.tile_idx_dtype = tile_idx_dtype
+        self.dispatch_func = {"int32": T.int32, "int64": T.int64}[tile_idx_dtype]
+
+    def handle_dep(self, input_dim, output_dim) -> tuple[GlobalVar, Expr, list[Expr]]:
+        # check the signature
+        if isinstance(self.dep, Callable):
+            if len(inspect.signature(self.dep).parameters) != input_dim:
+                raise ValueError(f"dep requires {input_dim} parameters")
+        dep_gvar, extra_args = trans_callable_to_primfunc(
+            self.dep, input_dim, output_dim, self.tile_idx_dtype
+        )
+        return dep_gvar, self.event, extra_args

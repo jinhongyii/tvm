@@ -94,9 +94,9 @@ class KVStateObj : public ffi::Object {
    * is the sum of "append_lengths". Nullptr means the token tree of each sequence
    * is a chain.
    */
-  virtual void BeginForward(
-      const ffi::Shape& seq_ids, const ffi::Shape& append_lengths,
-      const ffi::Optional<ffi::Shape>& token_tree_parent_ptr = std::nullopt) = 0;
+  virtual void BeginForward(const ffi::Shape& seq_ids, const ffi::Shape& append_lengths,
+                            const ffi::Optional<ffi::Shape>& token_tree_parent_ptr = std::nullopt,
+                            bool use_megakernel = false) = 0;
 
   /*!
    * \brief Mark the start of the forward function.

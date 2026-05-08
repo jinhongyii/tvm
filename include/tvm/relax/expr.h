@@ -900,6 +900,9 @@ constexpr const char* kForcePure = "relax.force_pure";
  * arguments are assumed to be weights that are fixed across invocations.
  */
 constexpr const char* kNumInput = "num_input";
+
+/*! \brief Whether to skip shape check, can be turned on to speed up execution. */
+constexpr const char* kSkipShapeCheck = "relax.skip_shape_check";
 }  // namespace attr
 
 /*! \brief The extern function, which can represent packed function. */

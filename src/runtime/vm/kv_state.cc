@@ -40,16 +40,21 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def_method("vm.builtin.kv_state_popn", &KVStateObj::PopN)
       .def_packed("vm.builtin.kv_state_begin_forward",
                   [](ffi::PackedArgs args, ffi::Any* rv) {
-                    TVM_FFI_ICHECK(args.size() == 3 || args.size() == 4)
-                        << "KVState BeginForward only accepts 3 or 4 arguments";
+                    TVM_FFI_ICHECK(args.size() >= 3 && args.size() <= 5)
+                        << "KVState BeginForward only accepts 3 to 5 arguments";
                     KVState kv_state = args[0].cast<KVState>();
                     ffi::Shape seq_ids = args[1].cast<ffi::Shape>();
                     ffi::Shape append_lengths = args[2].cast<ffi::Shape>();
                     ffi::Optional<ffi::Shape> token_tree_parent_ptr;
+                    bool use_megakernel = false;
                     if (args.size() == 4) {
                       token_tree_parent_ptr = args[3].cast<ffi::Optional<ffi::Shape>>();
                     }
-                    kv_state->BeginForward(seq_ids, append_lengths, token_tree_parent_ptr);
+                    if (args.size() == 5) {
+                      use_megakernel = args[4].cast<bool>();
+                    }
+                    kv_state->BeginForward(seq_ids, append_lengths, token_tree_parent_ptr,
+                                           use_megakernel);
                   })
       .def_method("vm.builtin.kv_state_end_forward", &KVStateObj::EndForward);
 }

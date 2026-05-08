@@ -70,6 +70,7 @@ class DataType {
     kFloat6_e2m3fn = kDLFloat6_e2m3fn,
     kFloat6_e3m2fn = kDLFloat6_e3m2fn,
     kFloat4_e2m1fn = kDLFloat4_e2m1fn,
+    kEventInt = 100,
     kCustomBegin = 129
   };
   /*! \brief default constructor */
@@ -89,6 +90,9 @@ class DataType {
   DataType(int code, int bits, int lanes, bool is_scalable = false) {
     data_.code = static_cast<uint8_t>(code);
     data_.bits = static_cast<uint8_t>(bits);
+    if (code == kEventInt) {
+      TVM_FFI_ICHECK_EQ(lanes, 1) << "EventInt must have lane == 1";
+    }
     if (is_scalable) {
       TVM_FFI_ICHECK(lanes > 1) << "Invalid value for vscale factor" << lanes;
     }
@@ -189,7 +193,9 @@ class DataType {
   /*! \return whether type is a bfloat16 type. */
   bool is_bfloat16() const { return code() == DataType::kBFloat && bits() == 16; }
   /*! \return whether type is an int type. */
-  bool is_int() const { return code() == DataType::kInt; }
+  bool is_int() const {
+    return code() == DataType::kInt || (code() == DataType::kEventInt && bits() > 0);
+  }
   /*! \return whether type is an uint type. */
   bool is_uint() const { return code() == DataType::kUInt; }
   /*! \return whether type is a handle type. */
@@ -211,6 +217,8 @@ class DataType {
   bool is_void() const {
     return code() == DataType::kHandle && bits() == 0 && static_cast<int16_t>(data_.lanes) == 0;
   }
+  /*! \return whether type is a event int type. */
+  bool is_event_int() const { return code() == DataType::kEventInt; }
   /*!
    * \brief Create a new data type by change lanes to a specified value.
    * \param lanes The target number of lanes.
@@ -252,8 +260,11 @@ class DataType {
    * \return The comparison result.
    */
   bool operator==(const DataType& other) const {
-    return data_.code == other.data_.code && data_.bits == other.data_.bits &&
-           data_.lanes == other.data_.lanes;
+    // make sure that event tensor can be combined with normal int tensor operation
+    return (data_.code == other.data_.code ||
+            (data_.code == DataType::kEventInt && other.data_.code == DataType::kInt) ||
+            (data_.code == DataType::kInt && other.data_.code == DataType::kEventInt)) &&
+           data_.bits == other.data_.bits && data_.lanes == other.data_.lanes;
   }
   /*!
    * \brief NotEqual comparator.
@@ -397,6 +408,12 @@ class DataType {
    * \return The constructed data type.
    */
   static DataType Void() { return DataType(kHandle, 0, 0); }
+  /*!
+   * \brief Construct an event int type.
+   * \return The constructed data type.
+   */
+  static DataType EventInt(int bits = 64) { return DataType(kEventInt, bits, 1); }
+
   /*!
    * \brief Get the corresponding type of TVMShapeIndex.
    * \return The type of TVM shape index.

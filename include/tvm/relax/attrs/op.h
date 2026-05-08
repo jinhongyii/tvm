@@ -118,6 +118,48 @@ struct HintOnDeviceAttrs : public AttrsNodeReflAdapter<HintOnDeviceAttrs> {
                                     BaseAttrsNode);
 };  // struct HintOnDeviceAttrs
 
+struct CallTIRDeviceAttrs : public AttrsNodeReflAdapter<CallTIRDeviceAttrs> {
+  int job_id;
+  ffi::Array<Expr> in_events;
+  ffi::Array<Expr> out_events;
+  ffi::Array<Expr> inv_in_events;
+  ffi::Array<ffi::Array<ffi::Any>> in_extra_args;
+  ffi::Array<ffi::Array<ffi::Any>> out_extra_args;
+  ffi::Array<ffi::Array<ffi::Any>> inv_in_extra_args;
+  ffi::Map<ffi::String, ffi::Any> handle_config;
+  ffi::Array<Integer> inplace_indices;
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<CallTIRDeviceAttrs>()
+        .def_ro("job_id", &CallTIRDeviceAttrs::job_id, "The job id.")
+        .def_ro("in_events", &CallTIRDeviceAttrs::in_events, "The input events.")
+        .def_ro("out_events", &CallTIRDeviceAttrs::out_events, "The output events.")
+        .def_ro("inv_in_events", &CallTIRDeviceAttrs::inv_in_events, "The inverse input events.")
+        .def_ro("in_extra_args", &CallTIRDeviceAttrs::in_extra_args, "The extra input args.")
+        .def_ro("out_extra_args", &CallTIRDeviceAttrs::out_extra_args, "The extra output args.")
+        .def_ro("inv_in_extra_args", &CallTIRDeviceAttrs::inv_in_extra_args,
+                "The inverse extra input args.")
+        .def_ro("handle_config", &CallTIRDeviceAttrs::handle_config, "The handle config.")
+        .def_ro("inplace_indices", &CallTIRDeviceAttrs::inplace_indices, "The inplace indices.");
+  }
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("relax.attrs.CallTIRDeviceAttrs", CallTIRDeviceAttrs,
+                                    BaseAttrsNode);
+};  // struct CallTIRDeviceAttrs
+
+struct AllocEventTensorAttrs : public AttrsNodeReflAdapter<AllocEventTensorAttrs> {
+  ffi::Array<ffi::Any> extra_args;
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<AllocEventTensorAttrs>().def_ro(
+        "extra_args", &AllocEventTensorAttrs::extra_args, "The extra arguments.");
+  }
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("relax.attrs.AllocEventTensorAttrs", AllocEventTensorAttrs,
+                                    BaseAttrsNode);
+};  // struct AllocEventTensorAttrs
 }  // namespace relax
 }  // namespace tvm
 

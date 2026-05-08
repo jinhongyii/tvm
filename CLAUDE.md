@@ -36,6 +36,7 @@ The codebase is an Apache TVM fork. Custom additions are concentrated in these a
 - **Transforms** — `transform/` — Buffer allocation, event tensor legalization
 - **Lang** — `lang/pipeline.py`, `lang/tile_scheduler.py`, `lang/warp_role.py` — Async pipeline management, tile scheduling, warp role dispatch
 - **Bench** — `bench.py` — Benchmarking utilities (profiling, CUDA timing, Proton integration)
+- **Megakernel** — `megakernel/kernels/` (23 fused LLM kernels), `megakernel/model/` (Llama, Qwen), `megakernel/utils/`
 
 ### Script Frontend (`python/tvm/script/`, `src/script/`)
 - **TIRX DSL API** — `python/tvm/script/tirx.py`, `ir_builder/tir/tirx.py` — 40+ builtin ops (Tx.gemm_async, Tx.copy_async, etc.)
@@ -54,7 +55,7 @@ The codebase is an Apache TVM fork. Custom additions are concentrated in these a
 - Core: `test_layout.py`, `test_parser_printer.py`, `test_verifier.py`, `test_exec_scope.py`
 - Codegen: `codegen/test_codegen_cuda.py`, `test_codegen_hopper.py`, `test_codegen_blackwell.py`, `test_codegen_nki.py`
 - Transforms: `transform/test_transform_lower_tirx.py`, `test_stmt_functor.py`, `test_expr_functor.py`
-- Kernels: `kernels/cuda/sm80/`, `sm90a/`, `sm100a/`; `kernels/trn/`
+- Kernels: `kernels/cuda/sm80/`, `sm90a/`, `sm100a/`, `megakernel/`; `kernels/trn/`
 
 ### Other
 - `kernels/sm100/` — Standalone SM100 GEMM kernels (fp16, fp8, nvfp4)
@@ -88,7 +89,7 @@ Use the following skills (slash commands) for standard operations:
   ```
 - `/tir-bench` — Run GEMM performance benchmarks (fp16, fp8, nvfp4)
 
-**SM100a tests** require the [tirx-kernels](https://github.com/mlc-ai/tirx-kernels) repo (kernel definitions are maintained separately). Install it as an editable pip package:
+**SM100a and megakernel tests** require the [tirx-kernels](https://github.com/mlc-ai/tirx-kernels) repo (kernel definitions are maintained separately). Install it as an editable pip package:
 ```bash
 git clone git@github.com:mlc-ai/tirx-kernels.git ~/tirx-kernels
 pip install -e ~/tirx-kernels
@@ -120,7 +121,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 <type>(<scope>): <short imperative description>
 
 Types: feat, fix, refactor, perf, test, docs, chore, ci, build
-Scopes: layout, kernel, op, op-dispatch, lower-tirx, tvmscript, infra
+Scopes: layout, kernel, op, op-dispatch, lower-tirx, tvmscript, megakernel, infra
 ```
 
 Default branch: **`tirx`** (not `main`). Always use `--base tirx` when creating PRs.
