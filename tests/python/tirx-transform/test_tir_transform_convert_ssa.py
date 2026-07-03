@@ -535,5 +535,48 @@ def test_shared_shape_var_in_buffer_map_and_alloc_buffer():
     tvm.ir.assert_structural_equal(after["main"], before)
 
 
+def test_reused_loop_var_with_elem_offset_buffer():
+    """Regression (B00015 / B00016): a duplicated loop that DECLARES a buffer
+    whose SSA-relevant var lives in ``elem_offset`` (not ``data``).
+
+    This is the shape produced when a DSMEM / TMA ``copy_async`` — which emits
+    ``for loop_vars: decl_buffer(data=<shared pool ptr>, elem_offset=loop_vars*S)``
+    — is expanded inside ``for hc in T.unroll(N)``.  ``UnrollLoop`` duplicates the
+    body via ``Substitute`` (structurally sharing the ``loop_vars`` Var and the
+    Buffer object across copies) and then runs ``ConvertSSA`` to re-legalize.
+
+    ConvertSSA must give each copy a fresh loop var AND rebuild its
+    ``decl_buffer``'s ``elem_offset`` consistently.  The old scoped ``buf_remap_``
+    cleanup keyed only on the buffer's ``data`` var (unchanged here), so it leaked
+    the remapped buffer of an earlier copy; from the 3rd copy on that stale buffer
+    was reused, injecting a previous copy's out-of-scope loop var into
+    ``elem_offset`` -> ``variable loop_vars has been used before definition`` in
+    ``SplitHostDevice``.  Three sibling copies are the minimum to trip it.
+    """
+    # Manually construct the (intentionally non-SSA) body: three sibling For
+    # loops that all reuse the same loop_var Var and the same Buffer object,
+    # exactly as loop unrolling produces.
+    loop_var = tirx.Var("loop_vars", "int32")
+    buf = tirx.decl_buffer(
+        (128,), "float32", "buf", elem_offset=loop_var * 128, scope="shared.dyn"
+    )
+    one_for = tirx.For(
+        loop_var,
+        0,
+        128,
+        tirx.ForKind.SERIAL,
+        tirx.DeclBuffer(buf, tirx.Evaluate(tirx.BufferLoad(buf, [0]))),
+    )
+    body = tirx.SeqStmt([one_for, one_for, one_for])
+    before = tirx.PrimFunc([buf.data], body)
+
+    mod = tvm.IRModule.from_expr(before)
+    after = tvm.tirx.transform.ConvertSSA()(mod)
+
+    # After SSA conversion every loop var must be defined by its own For before
+    # use; verify_well_formed rejects the leaked out-of-scope var otherwise.
+    tvm.tirx.analysis.verify_well_formed(after["main"], assert_mode=True)
+
+
 if __name__ == "__main__":
     tvm.testing.main()
