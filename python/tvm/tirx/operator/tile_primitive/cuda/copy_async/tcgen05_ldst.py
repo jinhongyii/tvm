@@ -99,16 +99,23 @@ def _classify_tmem_datapath(tmem_buf):
         cand = tmem_datapath_layout("D", 128, tmem_buf.shape[1]).canonicalize()
         try:
             tvm.ir.assert_structural_equal(buf_layout, cand)
-            return "D"
+            return ("D", 0)
         except (AssertionError, ValueError):
             return None
     if rows == 64:
-        cand = tmem_datapath_layout("F", 64, tmem_buf.shape[1]).canonicalize()
-        try:
-            tvm.ir.assert_structural_equal(buf_layout, cand)
-            return "F"
-        except (AssertionError, ValueError):
-            return None
+        # A 64-row buffer is Layout F. ``sub_slab`` (0 = lower lanes 0..15 of
+        # each warp partition, 1 = upper lanes 16..31) is read straight off the
+        # buffer's layout: an F-upper view of a 128-row D accumulator carries a
+        # +16 TLane offset. The .16x*b emit turns sub_slab into the PTX row
+        # immediate, so producer and consumer agree via the layout alone.
+        for sub in (0, 1):
+            cand = tmem_datapath_layout("F", 64, tmem_buf.shape[1], sub_slab=sub).canonicalize()
+            try:
+                tvm.ir.assert_structural_equal(buf_layout, cand)
+                return ("F", sub)
+            except (AssertionError, ValueError):
+                continue
+        return None
     return None
 
 
@@ -151,9 +158,10 @@ def _check_tmem_layout_for_atom(tmem_buf, atom_kind, frag_rows):
     unrecognized (i.e. it isn't Layout D or Layout F), the dispatch falls
     back to the structural assertions below.
     """
-    datapath = _classify_tmem_datapath(tmem_buf)
-    if datapath is None:
+    classified = _classify_tmem_datapath(tmem_buf)
+    if classified is None:
         return None
+    datapath, sub_slab = classified
     allowed = _TMEM_ATOM_COMPAT.get((datapath, atom_kind, frag_rows), False)
     if not allowed:
         raise ValueError(
@@ -163,7 +171,7 @@ def _check_tmem_layout_for_atom(tmem_buf, atom_kind, frag_rows):
             f"buffer was allocated via tmem_pool.alloc(..., "
             f"datapath={datapath!r})."
         )
-    return datapath
+    return (datapath, sub_slab)
 
 
 def copy_tmem_local_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc | None:
@@ -344,7 +352,17 @@ def _emit_16xnb_path(
     # warp partition rule and the atom's lane access pattern are baked into
     # the hardware); the layout classification just keeps the buffer's
     # logical row indexing in sync with the physical TMEM occupation.
-    datapath = _check_tmem_layout_for_atom(tmem_buf, "16x*b", frag_rows)
+    classified = _check_tmem_layout_for_atom(tmem_buf, "16x*b", frag_rows)
+    datapath, sub_slab = classified if classified is not None else (None, 0)
+    # ``sub_slab`` (0/1, read straight off the TMEM layout) shifts the read/
+    # write up by a 16-lane half-slab within each warp's 32-lane partition
+    # (0 = lanes 0..15, 1 = lanes 16..31); it folds into the PTX ``row``
+    # immediate below. Only M=64 can sit on the upper sub-slab, so
+    # ``sub_slab + n_slabs`` must stay within the 2 sub-slabs per partition.
+    assert sub_slab + n_slabs <= 2, (
+        f".16x*b sub_slab={sub_slab} with frag_rows={frag_rows} exceeds the 2 "
+        "sub-slabs of each warp's 32-lane TMEM partition"
+    )
 
     if datapath == "F":
         # Layout F: buffer shape (64, W), scattered row→lane.
@@ -416,7 +434,7 @@ def _emit_16xnb_path(
             op(
                 tmem_buf.allocated_addr[0],
                 *[local_32b[local_reg_base + reg_base + i] for i in range(regs_per_thread_per_slab)],  # noqa: E501
-                shape=shape, num=num, row=slab * 16, col=col_off_32b,
+                shape=shape, num=num, row=(sub_slab + slab) * 16, col=col_off_32b,
             )
     # fmt: on
     return impl

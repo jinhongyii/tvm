@@ -54,6 +54,15 @@ _POOL_UNSET = object()
 
 
 def _default_tmem_layout(rows, cols):
+    # For a 128-row (M=128) buffer this must stay byte-identical to
+    # ``tmem_datapath_layout("D", ...)`` so ``_classify_tmem_datapath``
+    # recognizes a default-allocated D accumulator; single-source the D case to
+    # prevent the two from drifting. Other row counts get a plain identity
+    # row->lane layout (not a named tcgen05 datapath).
+    if rows == 128:
+        from tvm.tirx.layout import tmem_datapath_layout
+
+        return tmem_datapath_layout("D", rows, cols)
     return TileLayout(S[(rows, cols) : (1 @ TLane, 1 @ TCol)])
 
 

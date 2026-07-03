@@ -226,8 +226,16 @@ def _align_layouts_no_post_canon(r_layout, r_shape, r_region, s_layout, s_shape,
     1-to-1 correspondence. Copy's tests don't hit this because R is
     typically 1D and doesn't fuse further after permute.
     """
-    r = r_layout.slice(list(r_shape), r_region).canonicalize()
-    s = s_layout.slice(list(s_shape), s_region).canonicalize()
+    # Canonicalize BEFORE slicing. A raw tcgen05 ``.16x*b`` atom layout carries
+    # ``laneid`` + ``wid_in_wg`` thread axes; ``slice()`` on that form only
+    # partially fuses them and leaves a mixed ``laneid``/``tid_in_wg`` layout
+    # whose ``GetScope()`` then fails ("conflicting scopes for thread"). Fusing
+    # ``laneid + wid_in_wg -> tid_in_wg`` first (needs the enclosing
+    # ``with sctx.target:``) makes the slice operate on a single-axis layout.
+    # Semantics-preserving; a no-op for already-``tid_in_wg`` ``.32x32b`` / plain
+    # register-tile layouts.
+    r = r_layout.canonicalize().slice(list(r_shape), r_region).canonicalize()
+    s = s_layout.canonicalize().slice(list(s_shape), s_region).canonicalize()
     s = _extract_tile(s, s_region)
     # Broadcast lift: when op's post-slice tensor shape != anchor's, expand
     # s via stride-0 iters so group() below can partition along anchor's
@@ -271,7 +279,10 @@ def align_operands_to_anchor(anchor_br, layout_others_br):
     if not layout_others_br:
         # Just slice + permute anchor alone (no post-canon — keep iters
         # 1-to-1 with how they'd appear with srcs).
-        r = anchor_layout.slice(list(anchor_shape), anchor_region).canonicalize()
+        # Canonicalize before slicing — see _align_layouts_no_post_canon: a raw
+        # ``.16x*b`` atom layout slices into a mixed ``laneid``/``tid_in_wg``
+        # layout that ``GetScope()`` rejects; fusing to ``tid_in_wg`` first fixes it.
+        r = anchor_layout.canonicalize().slice(list(anchor_shape), anchor_region).canonicalize()
         perm = _compute_perm_r(r)
         anchor_p = r.permute_dims(perm)
         return anchor_p, per_op_aligned

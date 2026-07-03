@@ -855,3 +855,95 @@ def test_alloc_tcgen05_frag_wrapper_compiles(shape, frag_rows, K_cols):
 
 if __name__ == "__main__":
     tvm.testing.main()
+
+
+# --------------------------------------------------------------------------
+# Layout-driven sub-slab read: an ``F(sub_slab=1)`` *view* of a 128-row D
+# accumulator reads the UPPER 16-lane sub-slab of each warp's 32-lane partition
+# (lanes 16..31 ...), the standalone counterpart of the M=128 read's row=16
+# issue. The selector lives in the TMEM layout (tmem_datapath_layout sub_slab),
+# not in a copy_async kwarg; the emit derives the PTX ``row`` from it.
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("shape,rep", [("16x256b", 4), ("16x128b", 4), ("16x64b", 8)])
+def test_tcgen05_16xnb_subslab_view_read(shape, rep):
+    dtype = "float32"
+    K = _COL_FACTOR_FP32[shape] * rep
+    regs128 = _REGS_FACTOR[shape] * rep * 2
+    regs64 = _REGS_FACTOR[shape] * rep
+    W = max(32, _next_pow2(K))
+    av128 = tcgen05_atom_layout(shape, (128, K), dtype)
+    av64 = tcgen05_atom_layout(shape, (64, K), dtype)
+    lay_D = tmem_datapath_layout("D", 128, W)
+    lay_F0 = tmem_datapath_layout("F", 64, W, sub_slab=0)
+    lay_F1 = tmem_datapath_layout("F", 64, W, sub_slab=1)
+
+    @T.prim_func
+    def kernel(A_ptr: T.handle, B128_ptr: T.handle, B0_ptr: T.handle, B1_ptr: T.handle) -> None:
+        A = T.match_buffer(A_ptr, (128, regs128), dtype)
+        B128 = T.match_buffer(B128_ptr, (128, regs128), dtype)
+        B0 = T.match_buffer(B0_ptr, (128, regs64), dtype)
+        B1 = T.match_buffer(B1_ptr, (128, regs64), dtype)
+        T.device_entry()
+        warp_id = T.warp_id([4])
+        T.cta_id([2])
+        wg_id = T.warpgroup_id([1])
+        T.warp_id_in_wg([4])
+        T.lane_id([32])
+        tid = T.thread_id([128])
+        taddr = T.alloc_shared([1], "uint32")
+        if wg_id == 0:
+            if warp_id == 0:
+                T.ptx.tcgen05.alloc(T.address_of(taddr), n_cols=W, cta_group=1)
+            T.tvm_storage_sync("shared")
+            tmemD = T.decl_buffer((128, W), dtype, scope="tmem", allocated_addr=taddr[0], layout=lay_D)
+            tmemF0 = T.decl_buffer((64, W), dtype, scope="tmem", allocated_addr=taddr[0], layout=lay_F0)
+            tmemF1 = T.decl_buffer((64, W), dtype, scope="tmem", allocated_addr=taddr[0], layout=lay_F1)
+            rin = T.alloc_local((regs128,), dtype)
+            for i in range(regs128):
+                rin[i] = A[tid, i]
+            T.cuda.cta_sync()
+            Tx.wg.copy_async(tmemD[0:128, 0:K], rin.view(128, K, layout=av128)[:, :])
+            T.ptx.tcgen05.wait.st()
+            T.cuda.cta_sync()
+            r128 = T.alloc_local((regs128,), dtype)
+            Tx.wg.copy_async(r128.view(128, K, layout=av128)[:, :], tmemD[0:128, 0:K])
+            T.ptx.tcgen05.wait.ld()
+            T.cuda.cta_sync()
+            for i in range(regs128):
+                B128[tid, i] = r128[i]
+            r0 = T.alloc_local((regs64,), dtype)
+            Tx.wg.copy_async(r0.view(64, K, layout=av64)[:, :], tmemF0[0:64, 0:K])
+            T.ptx.tcgen05.wait.ld()
+            T.cuda.cta_sync()
+            for i in range(regs64):
+                B0[tid, i] = r0[i]
+            r1 = T.alloc_local((regs64,), dtype)
+            Tx.wg.copy_async(r1.view(64, K, layout=av64)[:, :], tmemF1[0:64, 0:K])
+            T.ptx.tcgen05.wait.ld()
+            T.cuda.cta_sync()
+            for i in range(regs64):
+                B1[tid, i] = r1[i]
+            if warp_id == 0:
+                T.ptx.tcgen05.relinquish_alloc_permit(cta_group=1)
+                T.ptx.tcgen05.dealloc(taddr[0], n_cols=W, cta_group=1)
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(tvm.IRModule({"main": kernel}), target=target, tir_pipeline="tirx")
+        A_np = tvm.testing.generate_random_array(dtype, (128, regs128))
+        B128 = tvm.runtime.tensor(np.zeros((128, regs128), dtype), tvm.cuda(0))
+        B0 = tvm.runtime.tensor(np.zeros((128, regs64), dtype), tvm.cuda(0))
+        B1 = tvm.runtime.tensor(np.zeros((128, regs64), dtype), tvm.cuda(0))
+        mod(tvm.runtime.tensor(A_np, tvm.cuda(0)), B128, B0, B1)
+        B128, B0, B1 = B128.numpy(), B0.numpy(), B1.numpy()
+        # F(sub_slab=0/1) views read the low/high half-slab of the M=128 read.
+        np.testing.assert_array_equal(B0, B128[:, 0:regs64])
+        np.testing.assert_array_equal(B1, B128[:, regs64:regs128])
+
+
+def test_tmem_datapath_layout_F_upper_rejects_bad_sub_slab():
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        tmem_datapath_layout("F", 64, 8, sub_slab=2)
+    with _pytest.raises(ValueError):
+        tmem_datapath_layout("D", 128, 8, sub_slab=1)
