@@ -29,6 +29,7 @@
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/scope_stack.h>
 #include <tvm/s_tir/stmt.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/layout.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -84,6 +85,43 @@ Stmt MergeNest(const std::vector<std::vector<Stmt>>& nest, Stmt body) {
     body = MergeNest(*ri, body);
   }
   return body;
+}
+
+// A remapped buffer pushed onto IRConvertSSA::buf_remap_ may have been created
+// because *any* of the variables GetRemappedBuffer rewrites was SSA-renamed:
+// the data var, elem_offset, shape, strides, or the tile-layout shard/replica
+// iter extents/strides.  The scoped cleanup therefore has to recognise such a
+// buffer whenever *any* of those variables leaves scope -- not only when the
+// buffer's `data` var matches the popped rename.  The old data-var-only test
+// leaked buffers whose rename lived solely in `elem_offset` (a decl_buffer
+// created inside an unrolled DSMEM/TMA copy loop, whose data is the unchanged
+// shared pool pointer while elem_offset holds the loop var).  The stale buffer
+// was then reused by the next unrolled copy, injecting an out-of-scope loop var
+// into its elem_offset -> "used before definition" in split_host_device
+// (B00015 / B00016).
+static bool BufferDependsOnVar(const Buffer& buf, const VarNode* v) {
+  if (buf->data.get() == v) return true;
+  auto uses = [&](const PrimExpr& e) {
+    return e.defined() && UsesVar(e, [&](const VarNode* x) { return x == v; });
+  };
+  if (uses(buf->elem_offset)) return true;
+  for (const auto& e : buf->shape) {
+    if (uses(e)) return true;
+  }
+  for (const auto& e : buf->strides) {
+    if (uses(e)) return true;
+  }
+  if (buf->layout.defined()) {
+    if (auto opt_tile = buf->layout.value().as<TileLayoutNode>()) {
+      for (const auto& it : opt_tile->shard) {
+        if (uses(it->extent) || uses(it->stride)) return true;
+      }
+      for (const auto& it : opt_tile->replica) {
+        if (uses(it->extent) || uses(it->stride)) return true;
+      }
+    }
+  }
+  return false;
 }
 
 class IRConvertSSA final : public StmtExprMutator {
@@ -562,7 +600,7 @@ class IRConvertSSA final : public StmtExprMutator {
     var_remap_[old_var.get()].pop_back();
     for (auto& kv : buf_remap_) {
       std::vector<Buffer>& buffers = kv.second;
-      if (buffers.size() && (buffers.back()->data.get() == new_var.get())) {
+      if (buffers.size() && BufferDependsOnVar(buffers.back(), new_var.get())) {
         buffers.pop_back();
       }
     }
@@ -581,7 +619,7 @@ class IRConvertSSA final : public StmtExprMutator {
       var_remap_[remap.old_var.get()].pop_back();
       for (auto& kv : buf_remap_) {
         std::vector<Buffer>& buffers = kv.second;
-        if (buffers.size() && (buffers.back()->data.get() == remap.new_var.get())) {
+        if (buffers.size() && BufferDependsOnVar(buffers.back(), remap.new_var.get())) {
           buffers.pop_back();
         }
       }
@@ -618,7 +656,7 @@ class IRConvertSSA final : public StmtExprMutator {
         parent->var_remap_[remap.old_var.get()].pop_back();
         for (auto& kv : parent->buf_remap_) {
           std::vector<Buffer>& buffers = kv.second;
-          if (buffers.size() && (buffers.back()->data.get() == remap.new_var.get())) {
+          if (buffers.size() && BufferDependsOnVar(buffers.back(), remap.new_var.get())) {
             buffers.pop_back();
           }
         }
@@ -642,7 +680,7 @@ class IRConvertSSA final : public StmtExprMutator {
             parent->var_remap_[remap.old_var.get()].pop_back();
             for (auto& kv : parent->buf_remap_) {
               std::vector<Buffer>& buffers = kv.second;
-              if (buffers.size() && (buffers.back()->data.get() == remap.new_var.get())) {
+              if (buffers.size() && BufferDependsOnVar(buffers.back(), remap.new_var.get())) {
                 buffers.pop_back();
               }
             }
