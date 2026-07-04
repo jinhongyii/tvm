@@ -494,27 +494,28 @@ def _emit_datapath_b_path(
     ``TLane``, register axis ↔ ``TCol``), so a following ``Tx.copy`` to SMEM
     lands a plain ``(64, N)`` matrix with no cross-lane movement.
     """
+    # All user-facing preconditions raise ``ValueError`` (not bare ``assert``,
+    # which vanishes under ``python -O`` and reads as an internal error).
     # Accumulator readback is fp32; the .32x32b atom operates on 32-bit cells.
-    assert elem_per_32b == 1, (
-        f"datapath B readback expects an fp32 fragment (32-bit cells), got "
-        f"dtype={local_buf.dtype!r}"
-    )
+    if elem_per_32b != 1:
+        raise ValueError(
+            "datapath B readback expects an fp32 fragment (32-bit cells), got "
+            f"dtype={local_buf.dtype!r}"
+        )
+    if int(local_buf.shape[0]) != 64:
+        raise ValueError(
+            "datapath B (.cta_group::2 M=64) readback fragment must be (64, N); a "
+            f"128-row .32x32b fragment reads the wrong region. Got rows={local_buf.shape[0]}. "
+            "Allocate it with T.alloc_tcgen05_ldst_frag('32x32b', (64, N), 'float32')."
+        )
     N = int(local_buf.shape[1])
-    assert int(local_buf.shape[0]) == 64, (
-        f"datapath B fragment must be (64, N); got rows={local_buf.shape[0]}"
-    )
-    assert N % 2 == 0, f"datapath B fragment N must be even, got N={N}"
     n_half = N // 2  # physical tcols == per-thread fp32 registers
 
-    # ``.32x32b`` num must be a PTX Table 49 value; n_half = N/2 fp32 regs.
-    _valid_num = (1, 2, 4, 8, 16, 32, 64, 128)
-    assert n_half in _valid_num, (
-        f"datapath B: N/2={n_half} (from N={N}) is not a valid .32x32b register "
-        f"count; N must be 2 * a power of two in {_valid_num}"
-    )
-
-    # Local fragment layout must be exactly the Layout B register image
-    # (the "32x32b" atom layout at 64 rows).
+    # The Layout B register image *is* ``tcgen05_atom_layout("32x32b", (64, N))``;
+    # building it here also validates (with actionable ValueErrors) that N is
+    # even and N/2 is a valid ``.32x32b`` rep (PTX Table 49) — no need to
+    # re-check those separately. The structural compare then rejects any other
+    # fragment (e.g. a ``.16x*b`` frag).
     expected_local = tcgen05_atom_layout("32x32b", (64, N), local_buf.dtype).canonicalize()
     try:
         tvm.ir.assert_structural_equal(local_buf.layout.canonicalize(), expected_local)
@@ -523,8 +524,8 @@ def _emit_datapath_b_path(
             "datapath B (.cta_group::2 M=64) readback requires a matching Layout "
             "B register fragment. Allocate it with "
             "T.alloc_tcgen05_ldst_frag('32x32b', (64, N), 'float32') — a .16x*b "
-            "or a 128-row .32x32b fragment reads the wrong physical lanes/tcols "
-            f"for a Layout B accumulator. (frag layout mismatch: {e})"
+            "fragment reads the wrong physical lanes/tcols for a Layout B "
+            f"accumulator. (frag layout mismatch: {e})"
         ) from e
 
     # This path reads/writes the whole (64, N) accumulator in one shot; a

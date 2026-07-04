@@ -524,10 +524,11 @@ def test_layout_F_rejects_incompatible_atoms(atom_kind, frag_rows):
 
 def test_layout_B_rejects_bare_atom_frag():
     """A Layout B (M=64, .cta_group::2) TMEM accumulator physically spans all 128
-    lanes x N/2 tcols, so a bare ``.16x*b`` / ``.32x32b`` fragment reads the
-    wrong physical region. Reading one with anything other than the datapath-B
-    fragment (``T.alloc_tcgen05_datapath_b_frag``) must raise a clear error — the
-    exact failure mode of TIRx bug B00019's original ``.16x256b`` probe.
+    lanes x N/2 tcols, so a bare ``.16x*b`` fragment reads the wrong physical
+    region. Reading one with anything other than the datapath-B fragment
+    (``T.alloc_tcgen05_ldst_frag("32x32b", (64, N), ...)``) must raise a clear
+    error — the exact failure mode of TIRx bug B00019's original ``.16x256b``
+    probe.
     """
     N = 128
     tmem_layout = tmem_datapath_layout("B", 64, N)
@@ -565,15 +566,21 @@ def test_layout_B_rejects_bare_atom_frag():
 
 
 @pytest.mark.parametrize("N", [32, 64, 128, 256])
-def test_datapath_b_ld_st_roundtrip(N):
+@pytest.mark.parametrize("col_off", [0, 32])
+def test_datapath_b_ld_st_roundtrip(N, col_off):
     """``.st`` then ``.ld`` through a Layout B (M=64, .cta_group::2) TMEM buffer
     is the identity — exercises both directions of the datapath-B emit. Each of
     the 128 warpgroup threads owns ``N/2`` fp32 registers; the round-trip must
     preserve every per-thread value bit-for-bit.
+
+    ``col_off`` places the Layout B buffer at a **nonzero TMEM column** (as a
+    pooled alloc after a preceding buffer would): the ``.st``/``.ld`` both read
+    the buffer's ``allocated_addr`` (with the PTX ``col`` immediate 0), so a
+    correct base-column offset round-trips and a wrong one would corrupt/alias.
     """
     dtype = "float32"
     n_half = N // 2  # per-thread fp32 registers == physical tcols
-    tmem_col_width_32b = _next_pow2(max(32, n_half))
+    tmem_col_width_32b = _next_pow2(max(32, col_off + n_half))
     tmem_layout = tmem_datapath_layout("B", 64, N)
     reg_layout = tcgen05_atom_layout("32x32b", (64, N), dtype)
 
@@ -603,7 +610,7 @@ def test_datapath_b_ld_st_roundtrip(N):
                 (64, N),
                 dtype,
                 scope="tmem",
-                allocated_addr=tmem_addr[0],
+                allocated_addr=tmem_addr[0] + col_off,
                 layout=tmem_layout,
             )
 

@@ -596,12 +596,15 @@ __all__ += ["tcgen05_atom_layout", "tmem_datapath_layout", "wg_local_layout"]
 #   - ``"D"``: M=128, ``.cta_group::1``, full datapath. Identity row→lane.
 #   - ``"F"``: M=64, non-``.ws``, half datapath (4x1 lane utilization).
 #     Logical row r → physical lane (r // 16) * 32 + (r % 16).
-#   - ``"B"``: M=64, ``.cta_group::2``, Dense A ("2x2" datapath). Per-CTA
-#     ``(64, N)`` accumulator; the ``tcgen05.mma`` splits the N columns into two
-#     ``N/2`` halves and stores the upper half on physical lanes 64..127. So
-#     logical ``(r, c)`` → physical lane ``r + 64*(c // (N/2))``, tcol
-#     ``c % (N/2)`` — the buffer occupies all 128 lanes x ``N/2`` tcols (the
-#     same physical footprint as a Layout D ``(128, N/2)`` accumulator).
+#   - ``"B"``: M=64, ``.cta_group::2``, Dense A ("2x2" datapath). NOTE the PTX
+#     ISA titles this layout "M = 128 + cta_group::2" — that 128 is the row count
+#     of the *CTA-pair* MMA; each of the two CTAs holds **64** rows, so the
+#     per-CTA TMEM buffer this factory describes is ``(64, N)``. The
+#     ``tcgen05.mma`` splits the per-CTA N columns into two ``N/2`` halves and
+#     stores the upper half on physical lanes 64..127. So logical ``(r, c)`` →
+#     physical lane ``r + 64*(c // (N/2))``, tcol ``c % (N/2)`` — the buffer
+#     occupies all 128 lanes x ``N/2`` tcols (the same physical footprint as a
+#     Layout D ``(128, N/2)`` accumulator).
 #
 # Layouts A / C / E / G are reserved for future expansion.
 
