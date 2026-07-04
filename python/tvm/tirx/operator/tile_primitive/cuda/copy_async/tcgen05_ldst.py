@@ -108,8 +108,9 @@ def _classify_tmem_datapath(tmem_buf):
         except (AssertionError, ValueError):
             return None
     if rows == 64:
-        # Layout B (M=64, .cta_group::2 "2x2"): (64, 2, N/2) col-split spanning
-        # all 128 lanes. Disjoint from Layout F's scatter, so try it first.
+        # Layout B (M=64, .cta_group::2 "2x2"): (64, 2, N/2) — the N cols split
+        # into two N/2 lane-halves, together spanning all 128 lanes. Disjoint
+        # from Layout F's scatter, so try it first.
         if int(tmem_buf.shape[1]) % 2 == 0:
             cand = tmem_datapath_layout("B", 64, tmem_buf.shape[1]).canonicalize()
             try:
@@ -152,9 +153,10 @@ def _classify_tmem_datapath(tmem_buf):
 #                                |           |   high slab (row=16) is garbage
 #   F (M=64 scatter)x .32x32b    | no       | F only utilizes 16 of each
 #                                |           |   warp's 32 lanes
-#   B (M=64 2x2)    x any atom   | no       | B's (64, N) col-split spans all
-#                                |           |   128 lanes; it must be read via
-#                                |           |   the dedicated datapath-B path
+#   B (M=64 2x2)    x any atom   | no       | B splits its N cols into two N/2
+#                                |           |   lane-halves → all 128 lanes x
+#                                |           |   N/2 tcols; must be read via the
+#                                |           |   dedicated datapath-B path
 #                                |           |   (_emit_datapath_b_path), not a
 #                                |           |   bare .16x*b / .32x32b frag
 _TMEM_ATOM_COMPAT = {
