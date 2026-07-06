@@ -1847,7 +1847,9 @@ def alloc_tcgen05_ldst_frag(instr_shape, tensor_shape, dtype):
         per-shape per-lane register decomposition).
     tensor_shape : tuple[int, int]
         Logical fragment shape ``(frag_rows, K)`` in element units. ``frag_rows``
-        is ``128`` for ``.32x32b`` and ``64`` for the ``.16x*b`` shapes.
+        is ``128`` for ``.32x32b`` and ``64`` for the ``.16x*b`` shapes — plus
+        the **datapath B** special case ``("32x32b", (64, N))`` (fp32), the
+        Layout B (M=64, ``.cta_group::2``) readback image.
     dtype : str
         ``"float32"``, ``"float16"``, or ``"bfloat16"``.
 
@@ -1866,6 +1868,11 @@ def alloc_tcgen05_ldst_frag(instr_shape, tensor_shape, dtype):
     M=64 readback (.16x64b dispatch):
         ``frag = T.alloc_tcgen05_ldst_frag("16x64b", (64, 64), "float32")``
         ``Tx.copy_async(frag[:, :], tmem[0:64, 0:64])``
+
+    Datapath B readback (cta_group=2 M=64, one .32x32b over all 128 lanes):
+        ``C = tmem_pool.alloc((64, 128), "float32", datapath="B")``
+        ``frag = T.alloc_tcgen05_ldst_frag("32x32b", (64, 128), "float32")``
+        ``Tx.copy_async(frag[:, :], C[:, :])``
     """
     from tvm.tirx.layout import tcgen05_atom_layout  # local import to avoid cycle
 

@@ -82,14 +82,19 @@ def _match_tcgen05_atom_layout(buf):
 
 
 def _classify_tmem_datapath(tmem_buf):
-    """Return ``"D"`` / ``"F"`` if ``tmem_buf.layout`` matches a known tcgen05
-    datapath (PTX ISA §9.7.16.10.5), else ``None``.
+    """Return ``"D"`` / ``"F"`` / ``"B"`` if ``tmem_buf.layout`` matches a known
+    tcgen05 datapath (PTX ISA §9.7.16.10.5), else ``None``.
 
     Layout D (M=128, identity row→lane) is the default returned by
     ``_default_tmem_layout``. Layout F (M=64 non-``.ws``, scattered) is the
-    explicit opt-in produced by ``tmem_pool.alloc(..., datapath="F")``.
+    explicit opt-in produced by ``tmem_pool.alloc(..., datapath="F")``. Layout B
+    (M=64, ``.cta_group::2``, "2x2") is ``tmem_pool.alloc(..., datapath="B")``.
     The dispatch uses this to pair each ``.16x*b`` / ``.32x32b`` atom with a
-    compatible layout — see ``_check_tmem_layout_for_atom``.
+    compatible layout — see ``_check_tmem_layout_for_atom`` — and to route the
+    Layout B accumulator readback (``_emit_datapath_b_path``).
+
+    Returns a ``(datapath, sub_slab)`` tuple; ``sub_slab`` is only meaningful for
+    Layout F (0/1) and is always 0 for D and B.
     """
     if tmem_buf.layout is None:
         return None
@@ -103,11 +108,21 @@ def _classify_tmem_datapath(tmem_buf):
         except (AssertionError, ValueError):
             return None
     if rows == 64:
-        # A 64-row buffer is Layout F. ``sub_slab`` (0 = lower lanes 0..15 of
-        # each warp partition, 1 = upper lanes 16..31) is read straight off the
-        # buffer's layout: an F-upper view of a 128-row D accumulator carries a
-        # +16 TLane offset. The .16x*b emit turns sub_slab into the PTX row
-        # immediate, so producer and consumer agree via the layout alone.
+        # Layout B (M=64, .cta_group::2 "2x2"): (64, 2, N/2) — the N cols split
+        # into two N/2 lane-halves, together spanning all 128 lanes. Disjoint
+        # from Layout F's scatter, so try it first.
+        if int(tmem_buf.shape[1]) % 2 == 0:
+            cand = tmem_datapath_layout("B", 64, tmem_buf.shape[1]).canonicalize()
+            try:
+                tvm.ir.assert_structural_equal(buf_layout, cand)
+                return ("B", 0)
+            except (AssertionError, ValueError):
+                pass
+        # Otherwise a 64-row buffer is Layout F. ``sub_slab`` (0 = lower lanes
+        # 0..15 of each warp partition, 1 = upper lanes 16..31) is read straight
+        # off the buffer's layout: an F-upper view of a 128-row D accumulator
+        # carries a +16 TLane offset. The .16x*b emit turns sub_slab into the
+        # PTX row immediate, so producer and consumer agree via the layout alone.
         for sub in (0, 1):
             cand = tmem_datapath_layout("F", 64, tmem_buf.shape[1], sub_slab=sub).canonicalize()
             try:
@@ -138,6 +153,12 @@ def _classify_tmem_datapath(tmem_buf):
 #                                |           |   high slab (row=16) is garbage
 #   F (M=64 scatter)x .32x32b    | no       | F only utilizes 16 of each
 #                                |           |   warp's 32 lanes
+#   B (M=64 2x2)    x any atom   | no       | B splits its N cols into two N/2
+#                                |           |   lane-halves → all 128 lanes x
+#                                |           |   N/2 tcols; must be read via the
+#                                |           |   dedicated datapath-B path
+#                                |           |   (_emit_datapath_b_path), not a
+#                                |           |   bare .16x*b / .32x32b frag
 _TMEM_ATOM_COMPAT = {
     ("D", "32x32b", 128): True,
     ("D", "16x*b", 64): True,
@@ -145,6 +166,9 @@ _TMEM_ATOM_COMPAT = {
     ("F", "32x32b", 128): False,
     ("F", "16x*b", 64): True,
     ("F", "16x*b", 128): False,
+    ("B", "32x32b", 128): False,
+    ("B", "16x*b", 64): False,
+    ("B", "16x*b", 128): False,
 }
 
 
@@ -200,6 +224,23 @@ def copy_tmem_local_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> P
     elem_size = DataType(local_buf.dtype).bits
     elem_per_32b = 32 // elem_size
     assert len(local_buf.shape) == len(tmem_buf.shape) == 2
+
+    # Datapath B (M=64, .cta_group::2 "2x2") first: the TMEM buffer's datapath
+    # is authoritative here — a Layout B (64, N) accumulator spans all 128 lanes
+    # x N/2 tcols and must be read via one .32x32b, presenting the (64, N)
+    # logical fragment. Route on the TMEM classification before the local-atom
+    # match so a Layout B buffer never falls into the .16x*b / .32x32b M=128
+    # paths (which would assert on the 64-row shape).
+    if _classify_tmem_datapath(tmem_buf) == ("B", 0):
+        return _emit_datapath_b_path(
+            direction=direction,
+            tmem_buf=tmem_buf,
+            local_buf=local_buf,
+            tmem_region=tmem_region,
+            local_region=local_region,
+            elem_per_32b=elem_per_32b,
+            analyzer=analyzer,
+        )
 
     # Try the .16x* (M=64) path first by structural-matching the register-side
     # layout against ``tcgen05_atom_layout(instr_shape, (64, K), dtype)``. The
@@ -436,6 +477,89 @@ def _emit_16xnb_path(
                 *[local_32b[local_reg_base + reg_base + i] for i in range(regs_per_thread_per_slab)],  # noqa: E501
                 shape=shape, num=num, row=(sub_slab + slab) * 16, col=col_off_32b,
             )
+    # fmt: on
+    return impl
+
+
+def _emit_datapath_b_path(
+    *, direction, tmem_buf, local_buf, tmem_region, local_region, elem_per_32b, analyzer
+) -> PrimFunc:
+    """Read/write a Layout B (M=64, ``.cta_group::2`` "2x2") TMEM accumulator.
+
+    A Layout B ``(64, N)`` accumulator splits its N columns into two ``N/2``
+    lane-halves, so it physically occupies **all 128 lanes** and ``N/2`` tcols
+    (the same footprint as a Layout D ``(128, N/2)`` accumulator). It is read
+    with a single ``tcgen05.{ld,st}.32x32b`` over the full 128-lane partition —
+    thread ``t`` owns physical lane ``t`` and ``N/2`` consecutive fp32 registers
+    (one per tcol). The local fragment is presented as the **logical** ``(64,
+    N)`` tile via ``tcgen05_atom_layout("32x32b", (64, N))`` (``tid_in_wg`` ↔
+    ``TLane``, register axis ↔ ``TCol``), so a following ``Tx.copy`` to SMEM
+    lands a plain ``(64, N)`` matrix with no cross-lane movement.
+    """
+    # All user-facing preconditions raise ``ValueError`` (not bare ``assert``,
+    # which vanishes under ``python -O`` and reads as an internal error).
+    # Accumulator readback is fp32; the .32x32b atom operates on 32-bit cells.
+    if elem_per_32b != 1:
+        raise ValueError(
+            "datapath B readback expects an fp32 fragment (32-bit cells), got "
+            f"dtype={local_buf.dtype!r}"
+        )
+    if int(local_buf.shape[0]) != 64:
+        raise ValueError(
+            "datapath B (.cta_group::2 M=64) readback fragment must be (64, N); a "
+            f"128-row .32x32b fragment reads the wrong region. Got rows={local_buf.shape[0]}. "
+            "Allocate it with T.alloc_tcgen05_ldst_frag('32x32b', (64, N), 'float32')."
+        )
+    N = int(local_buf.shape[1])
+    n_half = N // 2  # physical tcols == per-thread fp32 registers
+
+    # The Layout B register image *is* ``tcgen05_atom_layout("32x32b", (64, N))``;
+    # building it here also validates (with actionable ValueErrors) that N is
+    # even and N/2 is a valid ``.32x32b`` rep (PTX Table 49) — no need to
+    # re-check those separately. The structural compare then rejects any other
+    # fragment (e.g. a ``.16x*b`` frag).
+    expected_local = tcgen05_atom_layout("32x32b", (64, N), local_buf.dtype).canonicalize()
+    try:
+        tvm.ir.assert_structural_equal(local_buf.layout.canonicalize(), expected_local)
+    except (AssertionError, ValueError) as e:
+        raise ValueError(
+            "datapath B (.cta_group::2 M=64) readback requires a matching Layout "
+            "B register fragment. Allocate it with "
+            "T.alloc_tcgen05_ldst_frag('32x32b', (64, N), 'float32') — a .16x*b "
+            "fragment reads the wrong physical lanes/tcols for a Layout B "
+            f"accumulator. (frag layout mismatch: {e})"
+        ) from e
+
+    # This path reads/writes the whole (64, N) accumulator in one shot; a
+    # partial logical-column slice does not map to a contiguous tcol range under
+    # the 2x2 split, so require the full region on both sides.
+    tmem_st, tmem_extent = get_st_extent(tmem_region)
+    local_st, local_extent = get_st_extent(local_region)
+    assert analyzer.can_prove_equal(tmem_st[0], 0) and analyzer.can_prove_equal(tmem_st[1], 0), (
+        "datapath B readback must cover the full (64, N) buffer (tmem slice must start at [0, 0])"
+    )
+    assert analyzer.can_prove_equal(tmem_extent[0], 64) and analyzer.can_prove_equal(
+        tmem_extent[1], N
+    ), "datapath B readback must cover the full (64, N) buffer"
+    assert analyzer.can_prove_equal(local_st[0], 0) and analyzer.can_prove_equal(local_st[1], 0)
+    assert analyzer.can_prove_equal(local_extent[0], 64) and analyzer.can_prove_equal(
+        local_extent[1], N
+    )
+
+    is_load = direction == "tmem2local"
+    op = T.ptx.tcgen05.ld if is_load else T.ptx.tcgen05.st
+
+    # fmt: off
+    @T.prim_func(check_well_formed=False)
+    def impl():
+        # Per-thread flat storage holds n_half fp32 == n_half uint32 registers.
+        local_storage = local_buf.view(n_half, layout=TileLayout(S[n_half]))
+        local_32b = local_storage.view("uint32")
+        op(
+            tmem_buf.allocated_addr[0],
+            *[local_32b[i] for i in range(n_half)],
+            shape="32x32b", num=n_half, row=0, col=0,
+        )
     # fmt: on
     return impl
 

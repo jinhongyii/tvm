@@ -596,11 +596,20 @@ __all__ += ["tcgen05_atom_layout", "tmem_datapath_layout", "wg_local_layout"]
 #   - ``"D"``: M=128, ``.cta_group::1``, full datapath. Identity row→lane.
 #   - ``"F"``: M=64, non-``.ws``, half datapath (4x1 lane utilization).
 #     Logical row r → physical lane (r // 16) * 32 + (r % 16).
+#   - ``"B"``: M=64, ``.cta_group::2``, Dense A ("2x2" datapath). NOTE the PTX
+#     ISA titles this layout "M = 128 + cta_group::2" — that 128 is the row count
+#     of the *CTA-pair* MMA; each of the two CTAs holds **64** rows, so the
+#     per-CTA TMEM buffer this factory describes is ``(64, N)``. The
+#     ``tcgen05.mma`` splits the per-CTA N columns into two ``N/2`` halves and
+#     stores the upper half on physical lanes 64..127. So logical ``(r, c)`` →
+#     physical lane ``r + 64*(c // (N/2))``, tcol ``c % (N/2)`` — the buffer
+#     occupies all 128 lanes x ``N/2`` tcols (the same physical footprint as a
+#     Layout D ``(128, N/2)`` accumulator).
 #
-# Layouts A / B / C / E / G are reserved for future expansion.
+# Layouts A / C / E / G are reserved for future expansion.
 
 
-_TMEM_DATAPATH_ROWS = {"D": 128, "F": 64}
+_TMEM_DATAPATH_ROWS = {"D": 128, "F": 64, "B": 64}
 
 
 def tmem_datapath_layout(datapath: str, rows: int, cols: int, sub_slab: int = 0) -> "TileLayout":
@@ -615,14 +624,16 @@ def tmem_datapath_layout(datapath: str, rows: int, cols: int, sub_slab: int = 0)
     Parameters
     ----------
     datapath : str
-        One of ``"D"`` (M=128, ``.cta_group::1``, full datapath) or
-        ``"F"`` (M=64, non-``.ws``, half datapath). Other layouts are not
+        One of ``"D"`` (M=128, ``.cta_group::1``, full datapath), ``"F"``
+        (M=64, non-``.ws``, half datapath), or ``"B"`` (M=64,
+        ``.cta_group::2``, Dense A, "2x2" datapath). Other layouts are not
         yet supported by this factory.
     rows : int
         Logical row count of the TMEM buffer. Must match the datapath's M
-        dimension: 128 for D, 64 for F.
+        dimension: 128 for D, 64 for F and B.
     cols : int
-        Logical column count.
+        Logical column count. For datapath ``"B"`` this is the per-CTA N and
+        must be even (the columns split into two ``N/2`` lane-halves).
 
     Returns
     -------
@@ -652,6 +663,25 @@ def tmem_datapath_layout(datapath: str, rows: int, cols: int, sub_slab: int = 0)
                 "sub-slabs; sub_slab must be 0"
             )
         return TileLayout(S[(rows, cols) : (1 @ tlane, 1 @ tcol)])
+    if datapath == "B":
+        # Layout B: M=64, .cta_group::2, Dense A ("2x2" datapath). The per-CTA
+        # (64, N) accumulator splits its N columns into two N/2 halves; the low
+        # half occupies physical lanes 0..63, the high half lanes 64..127. So a
+        # scalar row index r ∈ [0, 64) maps 1:1 to a TLane (stride 1) and the
+        # column decomposes (row-major) into a high bit c//(N/2) (TLane stride
+        # 64, selecting the lane-half) and a low index c%(N/2) (TCol stride 1).
+        # There is no half-slab (sub_slab) notion here — B always spans all 128
+        # lanes.
+        if sub_slab != 0:
+            raise ValueError(
+                "tmem_datapath_layout: datapath='B' spans all 128 lanes; sub_slab must be 0"
+            )
+        if cols % 2 != 0:
+            raise ValueError(
+                f"tmem_datapath_layout: datapath='B' expects even cols (N), got {cols}"
+            )
+        n_half = cols // 2
+        return TileLayout(S[(rows, 2, n_half) : (1 @ tlane, 64 @ tlane, 1 @ tcol)])
     # Layout F: M=64 scattered. Logical row r = wid * 16 + intra (wid ∈ [0,4),
     # intra ∈ [0,16)) → physical lane wid * 32 + sub_slab * 16 + intra. The
     # ``sub_slab`` term selects which 16-lane half of each warp's 32-lane
@@ -693,14 +723,17 @@ _TCGEN05_ATOM_REPS = {
 _TCGEN05_COL_FACTOR_FP32 = {"32x32b": 1, "16x64b": 2, "16x128b": 4, "16x256b": 8}
 
 # Allowed fragment row counts per warpgroup for each instr_shape. ``.32x32b``
-# is fixed at M=128; ``.16x*b`` natively covers M=64 (one 16-row slab per
-# warp, using lanes 0..15 of each warp's 32-lane TMEM partition) and can be
-# extended to M=128 by issuing the atom twice with row offsets 0 and 16
-# (covering lanes 0..15 + 16..31, i.e. the warp's full slab). The M=128
-# variant doubles per-thread registers and treats the extra slab as the
-# highest m-bit.
+# is an M=128 atom, but is *also* allowed at 64 rows as the **datapath B**
+# (M=64, ``.cta_group::2`` "2x2") readback image: a Layout B ``(64, N)``
+# accumulator is physically a 128-lane ``.32x32b`` read of ``(128, N/2)``,
+# re-labeled as a logical ``(64, N)`` tile (see the rows==64 branch below).
+# ``.16x*b`` natively covers M=64 (one 16-row slab per warp, using lanes
+# 0..15 of each warp's 32-lane TMEM partition) and can be extended to M=128
+# by issuing the atom twice with row offsets 0 and 16 (covering lanes 0..15
+# + 16..31, i.e. the warp's full slab). The M=128 variant doubles per-thread
+# registers and treats the extra slab as the highest m-bit.
 _TCGEN05_FRAG_ROWS = {
-    "32x32b": (128,),
+    "32x32b": (64, 128),
     "16x64b": (64, 128),
     "16x128b": (64, 128),
     "16x256b": (64, 128),
@@ -717,6 +750,15 @@ def tcgen05_atom_layout(instr_shape: str, tensor_shape: tuple[int, int], dtype) 
     Fragment row count is determined by ``instr_shape``: ``.32x32b`` covers an
     M=128 fragment (128 rows per warpgroup), and ``.16x{64,128,256}b`` covers
     an M=64 fragment (64 rows per warpgroup).
+
+    Special case — **datapath B** (M=64, ``.cta_group::2`` "2x2"):
+    ``tcgen05_atom_layout("32x32b", (64, N), "float32")`` returns the register
+    image for a Layout B accumulator readback. The ``(64, N)`` accumulator is
+    physically a 128-lane ``.32x32b`` read of ``(128, N/2)``, re-labeled as the
+    logical ``(64, N)`` tile (``N`` even, ``N/2`` a valid ``.32x32b`` rep). This
+    is the frag you pass to ``Tx.copy_async`` with a ``datapath="B"`` TMEM
+    buffer; allocate it the usual way via
+    ``T.alloc_tcgen05_ldst_frag("32x32b", (64, N), "float32")``.
 
     TMEM is kept **dense** for 16-bit dtypes: two 16-bit elements per 32-bit
     TMEM cell (matching the existing ``.32x32b`` convention). The PTX op is
@@ -778,6 +820,40 @@ def tcgen05_atom_layout(instr_shape: str, tensor_shape: tuple[int, int], dtype) 
         raise ValueError(
             f"tcgen05_atom_layout {instr_shape!r} expects rows ∈ {allowed_rows}, got {rows}"
         )
+
+    if instr_shape == "32x32b" and rows == 64:
+        # Datapath B (M=64, ``.cta_group::2`` "2x2") readback image. A Layout B
+        # ``(64, N)`` accumulator physically occupies all 128 lanes x ``N/2``
+        # tcols (the N columns split into two ``N/2`` lane-halves), so it is read
+        # with a single ``.32x32b`` over the full 128-lane partition — thread t
+        # owns physical lane t and ``N/2`` fp32 registers. This re-labels that
+        # ``(128, N/2)`` ``.32x32b`` register file as the logical ``(64, N)``
+        # tile: column ``c`` splits into the lane-half ``c // (N/2)`` (``tid_in_wg``
+        # stride 64) and the tcol ``c % (N/2)`` (register axis ``m``). Handled
+        # before the generic per-atom column math because the fragment's logical
+        # N columns map to ``N/2`` physical registers (not 1:1), and only fp32
+        # (a real tcgen05 accumulator) is meaningful here.
+        if bits != 32:
+            raise ValueError(
+                "tcgen05_atom_layout: 32x32b with 64 rows is the datapath B "
+                f"readback image and is fp32-only, got {dtype} ({bits} bits)"
+            )
+        if cols % 2 != 0:
+            raise ValueError(
+                f"tcgen05_atom_layout: 32x32b (64, N) datapath B image expects even N, got {cols}"
+            )
+        n_half = cols // 2
+        if n_half not in _TCGEN05_ATOM_REPS["32x32b"]:
+            raise ValueError(
+                f"tcgen05_atom_layout: 32x32b (64, N) datapath B image needs N/2={n_half} "
+                f"(from N={cols}) in the PTX Table 49 set {_TCGEN05_ATOM_REPS['32x32b']}"
+            )
+        iters = [
+            Iter(64, 1, Axis.tid_in_wg),
+            Iter(2, 64, Axis.tid_in_wg),
+            Iter(n_half, 1, "m"),
+        ]
+        return TileLayout.from_iters(iters, [], {})
 
     elem_per_32b = 32 // bits
     col_factor_elem = _TCGEN05_COL_FACTOR_FP32[instr_shape] * elem_per_32b

@@ -32,7 +32,7 @@ import tvm.testing
 from tvm.ir.type import PointerType, PrimType
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
-from tvm.tirx.layout import S, TCol, TileLayout, TLane, tcgen05_atom_layout
+from tvm.tirx.layout import S, TCol, TileLayout, TLane, tcgen05_atom_layout, tmem_datapath_layout
 from tvm.tirx.layout import tid_in_wg as axis_tid_in_wg
 from tvm.tirx.operator.tile_primitive.cuda.gemm_async import sf_tmem_layout
 from tvm.tirx.operator.tile_primitive.cuda.tma_utils import (
@@ -660,6 +660,144 @@ def test_gemm_tcgen05_cta_group_2_layout_b():
     with target:
         mod = tvm.IRModule({"main": gemm_async})
         mod.show()
+        mod = tvm.compile(mod, target=target, tir_pipeline="tirx")
+
+        A_np = np.random.randn(M_per_cta * 2, K).astype(A_dtype)
+        B_np = np.random.randn(N_logical, K).astype(B_dtype)
+        C_np = np.zeros(C_shape, dtype=C_dtype)
+        A_tvm = tvm.runtime.tensor(A_np, dev)
+        B_tvm = tvm.runtime.tensor(B_np, dev)
+        C_tvm = tvm.runtime.tensor(C_np, dev)
+        mod["main"](A_tvm, B_tvm, C_tvm)
+
+        # Reference: C = A @ B.T
+        C_ref = A_np.astype(np.float32) @ B_np.astype(np.float32).T
+        np.testing.assert_allclose(C_tvm.numpy(), C_ref, atol=1e-3, rtol=1e-3)
+
+
+def test_gemm_tcgen05_cta_group_2_datapath_b_readback():
+    """cta_group=2 M=64 GEMM read back via the first-class datapath="B" path.
+
+    Same math as ``test_gemm_tcgen05_cta_group_2_layout_b`` (C = A @ B.T, M=128
+    total / 64 per CTA, N=128), but the readback uses the supported tile
+    primitives instead of the hand-rolled physical (128, N/2) alias + manual
+    ``n_off`` re-indexing:
+
+      * TMEM is allocated with ``tmem_datapath_layout("B", 64, N)``.
+      * The accumulator is read into ``T.alloc_tcgen05_ldst_frag("32x32b",
+        (64, N))`` (a single ``.32x32b`` over all 128 lanes, presented as a
+        logical ``(64, N)`` fragment), then stored per-thread via
+        ``frag.local()`` — no manual per-thread column arithmetic in the frag.
+
+    This is the end-to-end regression for TIRx bug B00019.
+    """
+    M_per_cta = 64
+    N_logical = 128
+    N_half = N_logical // 2
+    K = 64
+    A_dtype = "float16"
+    B_dtype = "float16"
+    C_dtype = "float32"
+    swizzle_mode = 3
+
+    A_shape = (M_per_cta, K)
+    B_shape = (N_half, K)  # per CTA: N_logical // cta_group
+    C_shape = (M_per_cta * 2, N_logical)  # global output
+
+    A_elem_bytes = tvm.runtime.DataType(A_dtype).bits // 8
+    B_elem_bytes = tvm.runtime.DataType(B_dtype).bits // 8
+    C_elem_32b = 4 // (tvm.runtime.DataType(C_dtype).bits // 8)
+    cols_alloc = max(32, next_power_of_2(N_half // C_elem_32b))
+
+    A_layout = mma_shared_layout(A_dtype, swizzle_mode, A_shape)
+    B_layout = mma_shared_layout(B_dtype, swizzle_mode, B_shape)
+
+    per_cta_bytes = (
+        functools.reduce(operator.mul, A_shape, 1) * A_elem_bytes
+        + functools.reduce(operator.mul, B_shape, 1) * B_elem_bytes
+    )
+    total_bytes = per_cta_bytes * 2
+
+    # fmt: off
+    @T.prim_func
+    def gemm_async(A_ptr: T.handle, B_ptr: T.handle, C_ptr: T.handle) -> None:
+        A = T.match_buffer(A_ptr, (M_per_cta * 2, K), A_dtype)
+        B = T.match_buffer(B_ptr, (N_logical, K), B_dtype)
+        C = T.match_buffer(C_ptr, C_shape, C_dtype)
+
+        T.device_entry()
+        warp_id = T.warp_id([(1) * 4])
+        cbx, cby = T.cta_id_in_cluster([2, 1])
+        cta_id = T.cta_id([2])
+        wg_id = T.warpgroup_id([1])
+        tid_in_wg = T.thread_id_in_wg([128])
+
+        A_smem = T.alloc_buffer(A_shape, A_dtype, scope="shared", layout=A_layout)
+        B_smem = T.alloc_buffer(B_shape, B_dtype, scope="shared", layout=B_layout)
+        tmem_addr = T.alloc_shared([1], "uint32")
+        tma_mbar = T.alloc_shared([1], "uint64")
+        mma_mbar = T.alloc_shared([1], "uint64")
+
+        ptr: T.let[T.Var(name="ptr", dtype=PointerType(PrimType("uint64")))] = T.reinterpret("handle", T.ptx.map_shared_rank(tma_mbar.ptr_to([0]), 0))  # noqa: E501
+        tma_mbar_cta_0 = T.decl_buffer([1], "uint64", data=ptr, scope="shared")
+
+        if tid_in_wg == 0:
+            T.ptx.mbarrier.init(tma_mbar.ptr_to([0]), 1)
+            T.ptx.mbarrier.init(mma_mbar.ptr_to([0]), 1)
+
+        if warp_id == 0:
+            T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=cols_alloc, cta_group=2)
+        # First-class Layout B accumulator (datapath="B").
+        tmem = T.decl_buffer((M_per_cta, N_logical), C_dtype, scope="tmem", allocated_addr=tmem_addr[0], layout=tmem_datapath_layout("B", M_per_cta, N_logical))  # noqa: E501
+        T.ptx.fence.mbarrier_init()
+        T.ptx.fence.proxy_async("shared::cta")
+        T.cuda.cta_sync()
+        T.cuda.cluster_sync()
+
+        tma_args = T.meta_var({"dispatch": "tma", "mbar": tma_mbar_cta_0.ptr_to([0]), "cta_group": 2})  # noqa: E501
+        if tid_in_wg == 0:
+            Tx.copy_async(A_smem[0:M_per_cta, 0:K], A[cbx * M_per_cta:(cbx + 1) * M_per_cta, 0:K], **tma_args)  # noqa: E501
+            Tx.copy_async(B_smem[0:N_half, 0:K], B[cbx * N_half:(cbx + 1) * N_half, 0:K], **tma_args)  # noqa: E501
+            if cbx == 0:
+                T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)
+
+        if cbx == 0:
+            T.ptx.mbarrier.try_wait(tma_mbar.ptr_to([0]), 0)
+            T.ptx.tcgen05.fence.after_thread_sync()
+            T.cuda.cta_sync()
+            if tid_in_wg == 0:
+                Tx.gemm_async(tmem[0:M_per_cta, 0:N_logical], A_smem[0:M_per_cta, 0:K], B_smem[0:N_half, 0:K], dispatch="tcgen05", cta_group=2)  # noqa: E501
+                T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=2, cta_mask=3)
+        T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
+        T.ptx.tcgen05.fence.after_thread_sync()
+        T.cuda.cta_sync()
+
+        # First-class datapath-B readback: one .32x32b into a logical (64, N)
+        # fragment. The (64, N) view carries the Layout B register image, so its
+        # per-thread ``.local()`` slab is n_half contiguous fp32 = tcols 0..n_half
+        # for physical lane == tid_in_wg; thread t therefore owns logical row
+        # ``t % 64`` and column block ``(t // 64) * n_half`` (the exact inverse of
+        # the register image, with no aliasing or hand-built physical view).
+        frag = T.alloc_tcgen05_ldst_frag("32x32b", (M_per_cta, N_logical), C_dtype)
+        if wg_id == 0:
+            Tx.wg.copy_async(frag[:, :], tmem[0:M_per_cta, 0:N_logical])
+            T.ptx.tcgen05.wait.ld()
+        T.cuda.cta_sync()
+        n_off = (tid_in_wg // 64) * N_half
+        Tx.copy(C[cbx * M_per_cta + tid_in_wg % 64, n_off : n_off + N_half], frag.local()[:])
+        T.cuda.cta_sync()
+
+        if warp_id == 0:
+            T.ptx.tcgen05.relinquish_alloc_permit(cta_group=2)
+            T.ptx.tcgen05.dealloc(tmem_addr[0], n_cols=cols_alloc, cta_group=2)
+        # fmt: on
+
+    dev = tvm.cuda(0)
+    np.random.seed(0)
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.IRModule({"main": gemm_async})
         mod = tvm.compile(mod, target=target, tir_pipeline="tirx")
 
         A_np = np.random.randn(M_per_cta * 2, K).astype(A_dtype)

@@ -420,6 +420,53 @@ def test_tmem_datapath_layout_D_row_to_lane_mapping():
         )
 
 
+def test_tmem_datapath_layout_B_col_split_mapping():
+    """Layout B (M=64, .cta_group::2 "2x2"): logical (r, c) must land at
+    physical TMEM lane ``r + 64*(c // (N/2))`` and tcol ``c % (N/2)`` — the low
+    N/2 columns on lanes 0..63, the high N/2 columns on lanes 64..127.
+    """
+    N = 128
+    layout = tmem_datapath_layout("B", 64, N)
+    n_half = N // 2
+    for r in [0, 1, 31, 63]:
+        for c in [0, 1, n_half - 1, n_half, n_half + 1, N - 1]:
+            axis_values = layout.apply(r, c, shape=[64, N])
+            exp_lane = r + 64 * (c // n_half)
+            exp_tcol = c % n_half
+            assert int(axis_values["TLane"]) == exp_lane, (
+                f"(r={r}, c={c}) mapped to TLane {int(axis_values['TLane'])}, "
+                f"expected {exp_lane} (= r + 64*(c//(N/2)))"
+            )
+            assert int(axis_values["TCol"]) == exp_tcol, (
+                f"(r={r}, c={c}) mapped to TCol {int(axis_values['TCol'])}, "
+                f"expected {exp_tcol} (= c % (N/2))"
+            )
+
+
+def test_tcgen05_atom_layout_32x32b_datapath_b_mapping():
+    """``tcgen05_atom_layout("32x32b", (64, N))`` is the Layout B register image:
+    it mirrors the TMEM mapping with ``tid_in_wg`` in place of ``TLane`` (thread
+    == physical lane under .32x32b) and the register axis ``m`` in place of
+    ``TCol``: logical (r, c) → tid_in_wg ``r + 64*(c // (N/2))``, reg
+    ``c % (N/2)``.
+    """
+    N = 128
+    layout = tcgen05_atom_layout("32x32b", (64, N), "float32")
+    n_half = N // 2
+    for r in [0, 1, 31, 63]:
+        for c in [0, 1, n_half - 1, n_half, n_half + 1, N - 1]:
+            axis_values = layout.apply(r, c, shape=[64, N])
+            exp_tid = r + 64 * (c // n_half)
+            exp_m = c % n_half
+            assert int(axis_values.get("tid_in_wg", 0)) == exp_tid, (
+                f"(r={r}, c={c}) mapped to tid_in_wg "
+                f"{int(axis_values.get('tid_in_wg', 0))}, expected {exp_tid}"
+            )
+            assert int(axis_values.get("m", 0)) == exp_m, (
+                f"(r={r}, c={c}) mapped to m {int(axis_values.get('m', 0))}, expected {exp_m}"
+            )
+
+
 # Negative tests: the datapath/atom pairing matrix in ``tcgen05_ldst.py``
 # must reject mismatched combinations. We construct a Layout F TMEM buffer
 # (64 rows, scattered) and try to read it with a ``.16x*b`` M=128 atom,
@@ -473,6 +520,135 @@ def test_layout_F_rejects_incompatible_atoms(atom_kind, frag_rows):
         mod = tvm.IRModule({"main": kernel})
         with pytest.raises((ValueError, RuntimeError), match="datapath"):
             tvm.compile(mod, target=target, tir_pipeline="tirx")
+
+
+def test_layout_B_rejects_bare_atom_frag():
+    """A Layout B (M=64, .cta_group::2) TMEM accumulator physically spans all 128
+    lanes x N/2 tcols, so a bare ``.16x*b`` fragment reads the wrong physical
+    region. Reading one with anything other than the datapath-B fragment
+    (``T.alloc_tcgen05_ldst_frag("32x32b", (64, N), ...)``) must raise a clear
+    error — the exact failure mode of TIRx bug B00019's original ``.16x256b``
+    probe.
+    """
+    N = 128
+    tmem_layout = tmem_datapath_layout("B", 64, N)
+    # The original bug attempt: a (64, N) .16x256b fragment (rep = N/8).
+    atom_view = tcgen05_atom_layout("16x256b", (64, N), "float32")
+
+    @T.prim_func
+    def kernel() -> None:
+        T.device_entry()
+        T.warp_id([128 // 32])
+        T.cta_id([2])
+        wg_id = T.warpgroup_id([1])
+        T.warp_id_in_wg([4])
+        T.lane_id([32])
+        T.thread_id([128])
+        tmem_addr = T.alloc_shared([1], "uint32")
+        if wg_id == 0:
+            T.tvm_storage_sync("shared")
+            tmem = T.decl_buffer(
+                (64, N),
+                "float32",
+                scope="tmem",
+                allocated_addr=tmem_addr[0],
+                layout=tmem_layout,
+            )
+            frag = T.alloc_local((64 * N // 128,), "float32")
+            frag_view = frag.view(64, N, layout=atom_view)
+            Tx.wg.copy_async(frag_view[:, :], tmem[0:64, 0:N])
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.IRModule({"main": kernel})
+        with pytest.raises((ValueError, RuntimeError), match="datapath B"):
+            tvm.compile(mod, target=target, tir_pipeline="tirx")
+
+
+@pytest.mark.parametrize("N", [32, 64, 128, 256])
+@pytest.mark.parametrize("col_off", [0, 32])
+def test_datapath_b_ld_st_roundtrip(N, col_off):
+    """``.st`` then ``.ld`` through a Layout B (M=64, .cta_group::2) TMEM buffer
+    is the identity — exercises both directions of the datapath-B emit. Each of
+    the 128 warpgroup threads owns ``N/2`` fp32 registers; the round-trip must
+    preserve every per-thread value bit-for-bit.
+
+    ``col_off`` places the Layout B buffer at a **nonzero TMEM column** (as a
+    pooled alloc after a preceding buffer would): the ``.st``/``.ld`` both read
+    the buffer's ``allocated_addr`` (with the PTX ``col`` immediate 0), so a
+    correct base-column offset round-trips and a wrong one would corrupt/alias.
+    """
+    dtype = "float32"
+    n_half = N // 2  # per-thread fp32 registers == physical tcols
+    tmem_col_width_32b = _next_pow2(max(32, col_off + n_half))
+    tmem_layout = tmem_datapath_layout("B", 64, N)
+    reg_layout = tcgen05_atom_layout("32x32b", (64, N), dtype)
+
+    @T.prim_func
+    def kernel(A_ptr: T.handle, B_ptr: T.handle) -> None:
+        A = T.match_buffer(A_ptr, (128, n_half), dtype)
+        B = T.match_buffer(B_ptr, (128, n_half), dtype)
+
+        T.device_entry()
+        warp_id = T.warp_id([128 // 32])
+        T.cta_id([1])
+        wg_id = T.warpgroup_id([1])
+        T.warp_id_in_wg([4])
+        T.lane_id([32])
+        tid_in_wg = T.thread_id([128])
+
+        tmem_addr = T.alloc_shared([1], "uint32")
+
+        if wg_id == 0:
+            if warp_id == 0:
+                T.ptx.tcgen05.alloc(
+                    T.address_of(tmem_addr), n_cols=tmem_col_width_32b, cta_group=1
+                )
+            T.tvm_storage_sync("shared")
+
+            tmem = T.decl_buffer(
+                (64, N),
+                dtype,
+                scope="tmem",
+                allocated_addr=tmem_addr[0] + col_off,
+                layout=tmem_layout,
+            )
+
+            reg_in = T.alloc_local((n_half,), dtype)
+            for i in range(n_half):
+                reg_in[i] = A[tid_in_wg, i]
+            T.cuda.cta_sync()
+
+            # reg_in -> Layout B TMEM via the datapath-B .32x32b.st.
+            frag_in = reg_in.view(64, N, layout=reg_layout)
+            Tx.wg.copy_async(tmem[0:64, 0:N], frag_in[:, :])
+            T.ptx.tcgen05.wait.st()
+            T.cuda.cta_sync()
+
+            # Layout B TMEM -> reg_out via the datapath-B .32x32b.ld.
+            reg_out = T.alloc_local((n_half,), dtype)
+            frag_out = reg_out.view(64, N, layout=reg_layout)
+            Tx.wg.copy_async(frag_out[:, :], tmem[0:64, 0:N])
+            T.ptx.tcgen05.wait.ld()
+            T.cuda.cta_sync()
+            for i in range(n_half):
+                B[tid_in_wg, i] = reg_out[i]
+
+            if warp_id == 0:
+                T.ptx.tcgen05.relinquish_alloc_permit(cta_group=1)
+                T.ptx.tcgen05.dealloc(tmem_addr[0], n_cols=tmem_col_width_32b, cta_group=1)
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.IRModule({"main": kernel})
+        mod = tvm.compile(mod, target=target, tir_pipeline="tirx")
+        A_np = tvm.testing.generate_random_array(dtype, (128, n_half))
+        B_np = np.zeros((128, n_half), dtype=dtype)
+        DEV = tvm.cuda(0)
+        A = tvm.runtime.tensor(A_np, DEV)
+        B = tvm.runtime.tensor(B_np, DEV)
+        mod(A, B)
+        np.testing.assert_array_equal(B.numpy(), A.numpy())
 
 
 def _run_load_test(shape: str, rep: int, dtype: str):
