@@ -383,6 +383,10 @@ class Buffer(Object, Scriptable):
     def local(self, *shape, layout=None) -> "Buffer":
         """Create a thread-local view of this buffer.
 
+        ``local(...)[k]`` addresses the k-th physical storage element.
+        Multi-dim shapes are row-major reshapes of that order. Pass
+        ``layout=`` for a mediated view.
+
         When called with no shape arguments, auto-infers a 1D shape from
         the layout's non-thread component (i.e. ``layout.storage().shard``).
 
@@ -393,8 +397,7 @@ class Buffer(Object, Scriptable):
             shape is computed automatically.
 
         layout : optional
-            Override layout. If None, uses the storage layout
-            (parent layout with thread axes removed).
+            Override layout. If None, the default (identity) layout is used.
 
         Returns
         -------
@@ -419,7 +422,7 @@ class Buffer(Object, Scriptable):
             self.offset_factor,
             "",
             self.axis_separators,
-            self.layout.storage() if layout is None else layout,
+            "default" if layout is None else layout,
         )
 
     def permute(self, *dims) -> "Buffer":

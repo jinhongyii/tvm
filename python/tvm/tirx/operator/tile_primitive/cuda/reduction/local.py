@@ -357,8 +357,10 @@ def _emit_reduction_local_view(
     if need_save_accum:
         @T.prim_func(check_well_formed=False)
         def impl():
-            src_local = src.local(*src_local_shape)
-            dst_local = dst.local(*dst_local_shape)
+            # Dims of these views are the storage iters — use the mediated
+            # storage view explicitly (local() defaults to physical order).
+            src_local = src.local(*src_local_shape, layout=src.layout.storage())
+            dst_local = dst.local(*dst_local_shape, layout=dst.layout.storage())
             old_val = T.alloc_buffer([1], dtype, scope="local")
 
             for spa in T.serial(dst_local_total):
@@ -376,8 +378,10 @@ def _emit_reduction_local_view(
     else:
         @T.prim_func(check_well_formed=False)
         def impl():
-            src_local = src.local(*src_local_shape)
-            dst_local = dst.local(*dst_local_shape)
+            # Dims of these views are the storage iters — use the mediated
+            # storage view explicitly (local() defaults to physical order).
+            src_local = src.local(*src_local_shape, layout=src.layout.storage())
+            dst_local = dst.local(*dst_local_shape, layout=dst.layout.storage())
 
             for spa in T.serial(dst_local_total):
                 dst_idx = T.meta_var(get_indices(spa, dst_local_st, dst_local_ext))

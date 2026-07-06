@@ -240,7 +240,9 @@ def _build_tiled_numeric(Mt, Nt, Kt, kinst, beta, dtype):
     """End-to-end ``T.gemm`` over an Mt x Nt x Kt tiling, with the A/B inputs
     loaded and the D output stored register-by-register.
 
-    Fragments are indexed through their per-register multi-dim ``.local()`` views
+    Fragments are indexed through bare per-register ``.local()`` views: index
+    axes follow the PHYSICAL register order (stride-descending), i.e. exactly
+    the per-register maps in the module header
     (the shard's non-lane dims, in shard order): A = [Mt, rM(2), Kt, kHi, kp],
     B = [Kt, kHi, kp, Nt], D/C = [Mt, rM(2), Nt, rN(2)]. The lane owns g = lane>>2
     and t = lane&3; within a tile M = mt*16 + rM*8 + g, N = nt*8 + t*2 + rN,
@@ -265,28 +267,32 @@ def _build_tiled_numeric(Mt, Nt, Kt, kinst, beta, dtype):
         B_f = T.alloc_buffer((K, N), dtype, scope="local", layout=Bl)
         C_f = T.alloc_buffer((M, N), "float32", scope="local", layout=Dl)
         D_f = T.alloc_buffer((M, N), "float32", scope="local", layout=Dl)
-        A_reg = A_f.local(Mt, 2, Kt, kHi_n, KP)
-        for mt, rM, kt, kHi, kp in T.grid(Mt, 2, Kt, kHi_n, KP):
-            A_reg[mt, rM, kt, kHi, kp] = A_g[
+        # Views are bare .local(): index axes follow the PHYSICAL register
+        # order (stride-descending): A regs = ((mt*Kt + kt)*kHi_n + kHi)*4
+        # + 2*rM + kp; B regs = ((kt*Nt + nt)*kHi_n + kHi)*2 + kp;
+        # D/C regs = ((mt*Nt + nt)*2 + rM)*2 + rN.
+        A_reg = A_f.local(Mt, Kt, kHi_n, 2, KP)
+        for mt, kt, kHi, rM, kp in T.grid(Mt, Kt, kHi_n, 2, KP):
+            A_reg[mt, kt, kHi, rM, kp] = A_g[
                 mt * 16 + lane // 4 + 8 * rM,
                 kt * kinst + kHi * 8 + 2 * (lane % 4) + kp,
             ]
-        B_reg = B_f.local(Kt, kHi_n, KP, Nt)
-        for kt, kHi, kp, nt in T.grid(Kt, kHi_n, KP, Nt):
-            B_reg[kt, kHi, kp, nt] = B_g[
+        B_reg = B_f.local(Kt, Nt, kHi_n, KP)
+        for kt, nt, kHi, kp in T.grid(Kt, Nt, kHi_n, KP):
+            B_reg[kt, nt, kHi, kp] = B_g[
                 kt * kinst + kHi * 8 + 2 * (lane % 4) + kp,
                 nt * 8 + lane // 4,
             ]
         if beta == 1.0:
-            C_reg = C_f.local(Mt, 2, Nt, 2)
-            for mt, rM, nt, rN in T.grid(Mt, 2, Nt, 2):
-                C_reg[mt, rM, nt, rN] = C_g[
+            C_reg = C_f.local(Mt, Nt, 2, 2)
+            for mt, nt, rM, rN in T.grid(Mt, Nt, 2, 2):
+                C_reg[mt, nt, rM, rN] = C_g[
                     mt * 16 + lane // 4 + 8 * rM, nt * 8 + 2 * (lane % 4) + rN
                 ]
         Tx.warp.gemm(D_f, A_f, B_f, C_f, transpose_A=False, transpose_B=False, alpha=1.0, beta=beta)
-        D_reg = D_f.local(Mt, 2, Nt, 2)
-        for mt, rM, nt, rN in T.grid(Mt, 2, Nt, 2):
-            D_g[mt * 16 + lane // 4 + 8 * rM, nt * 8 + 2 * (lane % 4) + rN] = D_reg[mt, rM, nt, rN]
+        D_reg = D_f.local(Mt, Nt, 2, 2)
+        for mt, nt, rM, rN in T.grid(Mt, Nt, 2, 2):
+            D_g[mt * 16 + lane // 4 + 8 * rM, nt * 8 + 2 * (lane % 4) + rN] = D_reg[mt, nt, rM, rN]
 
     return gemm, M, N, K
 
@@ -317,15 +323,17 @@ def _build_transpose_numeric(transpose_A, transpose_B, dtype="float16"):
         A_f = T.alloc_buffer(A_shape, dtype, scope="local", layout=Al)
         B_f = T.alloc_buffer(B_shape, dtype, scope="local", layout=Bl)
         D_f = T.alloc_buffer((16, 8), "float32", scope="local", layout=D_FRAG)
+        # Physical register order (ma = kp + 2*rM + 4*kHi) is identical for
+        # both orientations — _transpose_frag only swaps the logical axes.
         A_reg = A_f.local(2, 2, 2)
         if transpose_A:
-            # A_KM_FRAG register order is [kHi, kp, rM]; buffer is [K, M].
-            for kHi, kp, rM in T.grid(2, 2, 2):
-                A_reg[kHi, kp, rM] = A_g[2 * (lane % 4) + kp + 8 * kHi, lane // 4 + 8 * rM]
+            # A_KM_FRAG: buffer is [K, M].
+            for kHi, rM, kp in T.grid(2, 2, 2):
+                A_reg[kHi, rM, kp] = A_g[2 * (lane % 4) + kp + 8 * kHi, lane // 4 + 8 * rM]
         else:
-            # A_FRAG register order is [rM, kHi, kp]; buffer is [M, K].
-            for rM, kHi, kp in T.grid(2, 2, 2):
-                A_reg[rM, kHi, kp] = A_g[lane // 4 + 8 * rM, 2 * (lane % 4) + kp + 8 * kHi]
+            # A_FRAG: buffer is [M, K].
+            for kHi, rM, kp in T.grid(2, 2, 2):
+                A_reg[kHi, rM, kp] = A_g[lane // 4 + 8 * rM, 2 * (lane % 4) + kp + 8 * kHi]
         B_reg = B_f.local(2, 2)
         if transpose_B:
             # B_NK_FRAG buffer is [N, K].
@@ -448,9 +456,10 @@ def test_cuda_gemm_mma_numerical(dtype):
         D_f = T.alloc_buffer((16, 8), "float32", scope="local", layout=D_FRAG)
         A_reg = A_f.local(8)
         for s in T.unroll(8):
+            # physical register order: s = 4*kHi + 2*rM + kp
             kp = s % 2
-            kHi = (s // 2) % 2
-            rM = s // 4
+            rM = (s // 2) % 2
+            kHi = s // 4
             A_reg[s] = A_g[lane // 4 + 8 * rM, 2 * (lane % 4) + kp + 8 * kHi]
         B_reg = B_f.local(4)
         for s in T.unroll(4):
