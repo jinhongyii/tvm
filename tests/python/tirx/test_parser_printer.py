@@ -1348,8 +1348,47 @@ def test_buffer_local_ir():
     for it in storage.shard:
         expected_total *= int(it.extent)
     assert int(b_local.shape[0]) == expected_total
-    # Layout: storage layout (parent layout with thread axes removed)
-    assert_structural_equal(b_local.layout, storage)
+    # Layout: default (identity) — local[k] is the k-th physical storage
+    # element, NOT the parent layout's storage-iter view.
+    assert b_local.layout.is_trivial()
+
+    # Round-trip
+    code = func.script()
+    assert from_source(code).script() == code
+
+
+def test_buffer_local_physical_order():
+    """``.local()[k]`` must be the k-th PHYSICAL register (identity layout),
+    even when the parent layout's storage iters enumerate in an order that
+    differs from their strides — the ``tcgen05`` ``.16x*b`` atoms are the
+    canonical case: their storage-iter view order (``va = (k>>4)&1``,
+    ``vb = (k>>1)&7``) differs from the register order
+    (``k = v0 + 2*va + 4*vb``). A hand formula transcribed from the PTX
+    fragment figure must be directly valid on the ``.local`` view."""
+    from tvm.tirx.layout import tcgen05_atom_layout
+
+    # fmt: off
+    @T.prim_func
+    def func() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([32], dtype="float32", scope="local")
+        B = A.view(64, 64, layout=tcgen05_atom_layout("16x256b", (64, 64), "float32"))
+        B_local = B.local(32)
+        B_local[2] = T.float32(0)
+        # fmt: on
+
+    bufs = _collect_buffers(func)
+    b_local = bufs["B_local"]
+    b_buf = bufs["B"]
+
+    assert b_local.data.same_as(b_buf.data)
+    assert len(b_local.shape) == 1 and int(b_local.shape[0]) == 32
+    # The parent's storage view is a genuine permutation (iter order differs
+    # from stride order) ...
+    storage = b_buf.layout.storage()
+    assert not storage.is_trivial()
+    # ... but the local view must NOT inherit it: identity layout only.
+    assert b_local.layout.is_trivial()
 
     # Round-trip
     code = func.script()
